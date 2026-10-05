@@ -29,15 +29,16 @@ jobs:
       - name: Revisar secretos
         env:
           GROQ: ${{ secrets.GROQ_API_KEY }}
+          IA_URL: ${{ secrets.IA_URL }}
           APP: ${{ secrets.KUMO_APP_TOKEN }}
           RUN: ${{ secrets.KUMO_RUNNER_TOKEN }}
         run: |
-          falta=""
+          falta=""""
           [ -n "$CLOUDFLARE_API_TOKEN" ] || falta="$falta CLOUDFLARE_API_TOKEN"
           [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || falta="$falta CLOUDFLARE_ACCOUNT_ID"
           [ -n "$APP" ] || falta="$falta KUMO_APP_TOKEN"
           [ -n "$RUN" ] || falta="$falta KUMO_RUNNER_TOKEN"
-          [ -n "$GROQ" ] || echo "::warning::Sin GROQ_API_KEY: el bot funcionará sin IA"
+          [ -n "$IA_URL$GROQ" ] || echo "::warning::Sin proveedor de IA: el bot funcionará sin IA"
           if [ -n "$falta" ]; then echo "::error::Faltan secretos:$falta"; exit 1; fi
 
       - name: Subdominio workers.dev
@@ -69,6 +70,9 @@ jobs:
         working-directory: worker
         env:
           GROQ: ${{ secrets.GROQ_API_KEY }}
+          IA_URL: ${{ secrets.IA_URL }}
+          IA_MODELOS: ${{ secrets.IA_MODELOS }}
+          IA_CLAVE: ${{ secrets.IA_CLAVE }}
           APP: ${{ secrets.KUMO_APP_TOKEN }}
           RUN: ${{ secrets.KUMO_RUNNER_TOKEN }}
         run: |
@@ -77,7 +81,12 @@ jobs:
           npx wrangler deploy
           printf '%s' "$APP" | npx wrangler secret put APP_TOKEN
           printf '%s' "$RUN" | npx wrangler secret put RUNNER_TOKEN
-          if [ -n "$GROQ" ]; then printf '%s' "$GROQ" | npx wrangler secret put GROQ_API_KEY; fi
+          # Secretos de IA: se ponen si existen y se borran si ya no (al cambiar de proveedor).
+          for n in IA_URL IA_MODELOS IA_CLAVE GROQ; do
+            v="${!n}"; nombre="$n"; [ "$n" = GROQ ] && nombre=GROQ_API_KEY
+            if [ -n "$v" ]; then printf '%s' "$v" | npx wrangler secret put "$nombre"
+            else npx wrangler secret delete "$nombre" </dev/null >/dev/null 2>&1 || true; fi
+          done
 
       - name: Comprobar y guardar la dirección
         run: |

@@ -94,6 +94,16 @@ class CcxtExchange:
         total = b.get("total") or {}
         return {k.upper(): _f(v) for k, v in total.items() if _f(v) > 0}
 
+    def saldo_perps(self):
+        """USDC en la cuenta de futuros (Perps). Hyperliquid la separa de Spot, que es donde opera Kumo."""
+        if self.id != "hyperliquid" or not self.con_claves:
+            return 0.0
+        try:
+            b = self.ex.fetch_balance({"type": "swap"})
+        except ccxt.BaseError:
+            return 0.0
+        return _f((b.get("total") or {}).get("USDC"))
+
     def precios(self, simbolos):
         pares = [self._par(s) for s in simbolos if s.upper() != self.quote and self.existe(s)]
         out = {}

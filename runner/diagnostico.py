@@ -36,6 +36,19 @@ def exchange():
         linea(clave.startswith("0x") and len(clave) == 42, "Dirección con formato 0x + 40 caracteres")
         s = secreto[2:] if secreto.startswith("0x") else secreto
         linea(len(s) == 64, "Clave privada de 64 caracteres hexadecimales")
+        try:
+            ex = crear_exchange(ex_id, "USDC", clave, secreto)
+            corta = lambda d: f"{d[:6]}…{d[-4:]}"  # noqa: E731
+            firmante = ex.ex.eth_get_address_from_private_key(ex.ex.privateKey)
+            rol_p = ex._info_hl({"type": "userRole", "user": clave}).get("role")
+            rol_f = ex._info_hl({"type": "userRole", "user": firmante})
+            print(f"ℹ Dirección pegada {corta(clave)}: cuenta tipo «{rol_p}»")
+            print(f"ℹ La clave privada es de {corta(firmante)}: cuenta tipo «{rol_f.get('role')}»" +
+                  (f", API wallet de {corta(rol_f['data']['user'])}" if rol_f.get("role") == "agent" else ""))
+            if rol_f.get("role") == "user":
+                print("⚠ Esa clave privada es la de tu billetera principal: puede RETIRAR fondos. Crea una API wallet en Hyperliquid (More → API) y usa su clave.")
+        except Exception as e:
+            print(f"ℹ No pude comprobar las cuentas: {type(e).__name__}")
     try:
         ex = crear_exchange(ex_id, os.getenv("QUOTE", "USDC") if ex_id == "hyperliquid" else "USDT", clave, secreto, os.getenv("EXCHANGE_PASSWORD", ""))
         saldos = ex.saldos()

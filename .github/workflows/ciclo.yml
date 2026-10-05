@@ -40,6 +40,9 @@ jobs:
         env:
           KUMO_RUNNER_TOKEN: ${{ secrets.KUMO_RUNNER_TOKEN }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          IA_URL: ${{ secrets.IA_URL }}
+          IA_MODELOS: ${{ secrets.IA_MODELOS }}
+          IA_CLAVE: ${{ secrets.IA_CLAVE }}
           EXCHANGE_ID: ${{ secrets.EXCHANGE_ID }}
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_SECRET: ${{ secrets.EXCHANGE_SECRET }}

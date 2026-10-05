@@ -7,12 +7,17 @@ export interface Env {
   KUMO: KVNamespace;
   APP_TOKEN: string;
   RUNNER_TOKEN: string;
+  // IA: cualquier proveedor compatible con OpenAI. IA_CLAVE va vacía en los
+  // que no piden cuenta (Kilo). GROQ_* queda para nubes instaladas antes.
+  IA_URL?: string;
+  IA_MODELOS?: string;
+  IA_CLAVE?: string;
   GROQ_API_KEY?: string;
   GROQ_MODEL?: string;
 }
 
 const VERSION = '1.0.0';
-const MODELOS = ['qwen/qwen3.8-27b', 'openai/gpt-oss-120b', 'llama-3.3-70b-versatile'];
+const GROQ_MODELOS = ['qwen/qwen3.8-27b', 'openai/gpt-oss-120b', 'llama-3.3-70b-versatile'];
 
 type Json = Record<string, any>;
 
@@ -155,23 +160,57 @@ async function runnerConfig(env: Env): Promise<Response> {
 // ---------------------------------------------------------------- IA radar
 const analisisMem = new Map<string, { ts: number; datos: Json }>();
 
-async function groq(env: Env, mensajes: Json[]): Promise<{ texto: string; modelo: string }> {
-  if (!env.GROQ_API_KEY) throw new Error('Falta GROQ_API_KEY en tu nube');
-  let ultimo = '';
-  for (const modelo of [env.GROQ_MODEL, ...MODELOS].filter(Boolean) as string[]) {
-    const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: modelo, messages: mensajes, temperature: 0.2, response_format: { type: 'json_object' } }),
-    });
-    if (r.ok) {
-      const d: any = await r.json();
-      return { texto: d.choices?.[0]?.message?.content || '{}', modelo };
-    }
-    ultimo = `Groq HTTP ${r.status}`;
-    if (r.status === 401 || r.status === 403) break;
+function proveedorIA(env: Env): { url: string; clave: string; modelos: string[]; nombre: string } | null {
+  const url = (env.IA_URL || '').trim().replace(/\/+$/, '');
+  if (url) {
+    const modelos = (env.IA_MODELOS || '').split(',').map((m) => m.trim()).filter(Boolean);
+    return { url, clave: (env.IA_CLAVE || '').trim(), modelos, nombre: url.replace(/^https?:\/\/(api\.)?/, '').split('/')[0] };
   }
-  throw new Error(ultimo || 'Groq no respondió');
+  if (env.GROQ_API_KEY) {
+    return { url: 'https://api.groq.com/openai/v1', clave: env.GROQ_API_KEY, modelos: [env.GROQ_MODEL, ...GROQ_MODELOS].filter(Boolean) as string[], nombre: 'groq.com' };
+  }
+  return null;
+}
+
+// Algunos modelos envuelven el JSON en ```json``` o en <think>…</think>.
+function extraerJson(texto: string): Json {
+  const t = (texto || '').replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+  try { return JSON.parse(t); } catch {
+    const a = t.indexOf('{'), b = t.lastIndexOf('}');
+    if (a >= 0 && b > a) return JSON.parse(t.slice(a, b + 1));
+    throw new Error('JSON inválido');
+  }
+}
+
+async function iaChat(env: Env, mensajes: Json[]): Promise<{ datos: Json; modelo: string }> {
+  const p = proveedorIA(env);
+  if (!p) throw new Error('Tu nube no tiene IA configurada: elige un proveedor en Config → Cambiar claves');
+  if (!p.modelos.length) throw new Error(`Falta IA_MODELOS para ${p.nombre}`);
+  const cab: Record<string, string> = { 'Content-Type': 'application/json', 'User-Agent': 'kumo-bot/1.0' };
+  if (p.clave) cab.Authorization = `Bearer ${p.clave}`;
+  let ultimo = '';
+  for (const modelo of p.modelos) {
+    for (const formatoJson of [true, false]) {
+      const cuerpo: Json = { model: modelo, messages: mensajes, temperature: 0.2 };
+      if (formatoJson) cuerpo.response_format = { type: 'json_object' };
+      let r: Response;
+      try {
+        r = await fetch(`${p.url}/chat/completions`, { method: 'POST', headers: cab, body: JSON.stringify(cuerpo) });
+      } catch (e) {
+        ultimo = `${p.nombre}: sin conexión con ${modelo}`;
+        break;
+      }
+      if (r.ok) {
+        const d: any = await r.json().catch(() => ({}));
+        try { return { datos: extraerJson(d.choices?.[0]?.message?.content || ''), modelo }; } catch { ultimo = `${p.nombre}: ${modelo} no respondió JSON`; break; }
+      }
+      ultimo = `${p.nombre} HTTP ${r.status} con ${modelo}`;
+      if (r.status === 401 || r.status === 403) throw new Error(`${p.nombre} rechazó la clave de IA (HTTP ${r.status})`);
+      if (r.status === 400 && formatoJson) continue; // no acepta response_format: reintenta sin él
+      break;
+    }
+  }
+  throw new Error(ultimo || 'La IA no respondió');
 }
 
 async function radarAnalizar(env: Env, cuerpo: Json): Promise<Response> {
@@ -183,12 +222,10 @@ async function radarAnalizar(env: Env, cuerpo: Json): Promise<Response> {
   const fila = (estado.radar || []).find((f: Json) => f.simbolo === sym);
   if (!fila) return json({ error: `${sym} aún no tiene datos. Pide el análisis y espera el próximo ciclo.`, pendiente: true }, 404);
   const cartera = (estado.ultimo?.activos || []).map((a: Json) => ({ s: a.simbolo, peso: a.peso }));
-  const { texto, modelo } = await groq(env, [
+  const { datos: d, modelo } = await iaChat(env, [
     { role: 'system', content: 'Eres un analista cripto prudente para principiantes. Respondes SOLO JSON válido en español.' },
     { role: 'user', content: `Evalúa si conviene INCORPORAR la moneda ${sym} a un bot de trading spot.\nDatos de mercado (velas diarias del exchange del usuario): ${JSON.stringify(fila)}\nCartera actual (peso %): ${JSON.stringify(cartera)}\nModo: ${config.modo}.\nIncluye qué es el proyecto si lo conoces (sin inventar cifras), riesgos y una entrada sugerida.\nFormato: {"veredicto":"INCORPORAR|ESPERAR|NO INCORPORAR","confianza":0-100,"resena":"2-4 frases","riesgos":["..."],"entrada":numero|null,"pct_sugerido":1-10}` },
   ]);
-  let d: Json;
-  try { d = JSON.parse(texto); } catch { return json({ error: 'La IA respondió en un formato inválido, intenta de nuevo' }, 502); }
   const veredicto = ['INCORPORAR', 'ESPERAR', 'NO INCORPORAR'].includes(String(d.veredicto).toUpperCase()) ? String(d.veredicto).toUpperCase() : 'ESPERAR';
   const datos = {
     simbolo: sym, fila, modelo, veredicto,

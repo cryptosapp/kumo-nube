@@ -95,7 +95,12 @@ class CcxtExchange:
             else:  # «missing»: quizá la clave privada es de una API wallet de otra cuenta
                 firmante = self.ex.eth_get_address_from_private_key(self.ex.privateKey)
                 rol_f = self._info_hl({"type": "userRole", "user": firmante})
-                principal = (rol_f.get("data") or {}).get("user") if rol_f.get("role") == "agent" else None
+                if rol_f.get("role") == "agent":
+                    principal = (rol_f.get("data") or {}).get("user")
+                elif rol_f.get("role") == "user":
+                    principal = firmante  # la clave es de la billetera principal (puede retirar: mejor una API wallet)
+                else:
+                    principal = None
                 motivo = "la dirección que pegaste no tiene cuenta en Hyperliquid"
             if principal:
                 self.ex.walletAddress = principal

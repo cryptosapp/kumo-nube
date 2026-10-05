@@ -1,0 +1,47 @@
+name: Ciclo Kumo
+
+# Un ciclo del bot cada 30 min (≈1.440 min/mes: cabe en los 2.000 gratis de un repo privado).
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+  repository_dispatch:
+    types: [kumo-ciclo]
+
+concurrency:
+  group: kumo-ciclo
+  cancel-in-progress: false
+
+jobs:
+  ciclo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ¿Está instalado?
+        id: inst
+        run: |
+          if [ -f kumo.json ]; then echo "ok=1" >> "$GITHUB_OUTPUT"; else echo "Kumo aún no está instalado: ejecuta «Instalar Kumo»."; fi
+
+      - uses: actions/setup-python@v5
+        if: steps.inst.outputs.ok
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: runner/requirements.txt
+
+      - name: Dependencias
+        if: steps.inst.outputs.ok
+        run: pip install -q -r runner/requirements.txt
+
+      - name: Ejecutar ciclo
+        if: steps.inst.outputs.ok
+        env:
+          KUMO_RUNNER_TOKEN: ${{ secrets.KUMO_RUNNER_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          EXCHANGE_ID: ${{ secrets.EXCHANGE_ID }}
+          EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
+          EXCHANGE_SECRET: ${{ secrets.EXCHANGE_SECRET }}
+          EXCHANGE_PASSWORD: ${{ secrets.EXCHANGE_PASSWORD }}
+        run: python runner/kumo_runner.py

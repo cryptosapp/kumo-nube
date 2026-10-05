@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="512" height="512">
+  <rect width="108" height="108" rx="24" fill="#120A24"/>
+  <g fill="#FF2E88" opacity=".22">
+    <circle cx="14" cy="14" r="2"/><circle cx="22" cy="14" r="1.6"/><circle cx="14" cy="22" r="1.6"/><circle cx="22" cy="22" r="1.2"/><circle cx="30" cy="14" r="1.1"/><circle cx="14" cy="30" r="1.1"/>
+    <circle cx="94" cy="94" r="2"/><circle cx="86" cy="94" r="1.6"/><circle cx="94" cy="86" r="1.6"/><circle cx="86" cy="86" r="1.2"/><circle cx="78" cy="94" r="1.1"/><circle cx="94" cy="78" r="1.1"/>
+  </g>
+  <g stroke="#00E5FF" stroke-width="1.6" stroke-linecap="round" opacity=".55">
+    <path d="M6 40 L20 44"/><path d="M8 52 L19 52"/><path d="M102 34 L89 39"/><path d="M103 47 L92 48"/><path d="M48 6 L50 17"/><path d="M62 5 L60 16"/>
+  </g>
+  <path fill="#00E5FF" d="M34 71 C25 71 20 65 20 58 C20 51 26 46 33 47 C34 37 43 31 52 33 C57 26 68 25 75 32 C84 31 91 38 90 47 C96 49 98 56 96 62 C94 67 89 71 83 71 Z"/>
+  <path fill="#F6F2FF" stroke="#05030A" stroke-width="2.6" stroke-linejoin="round" d="M31 68 C22 68 17 62 17 55 C17 48 23 43 30 44 C31 34 40 28 49 30 C54 23 65 22 72 29 C81 28 88 35 87 44 C93 46 95 53 93 59 C91 64 86 68 80 68 Z"/>
+  <rect x="33" y="44" width="44" height="12" rx="6" fill="#120A24"/>
+  <path fill="#00E5FF" d="M38 47.5 L51 49.5 L50.5 53 L39 52 Z"/>
+  <path fill="#00E5FF" d="M59 49.5 L72 47.5 L71 52 L59.5 53 Z"/>
+  <path fill="#FFFFFF" d="M40 48.4 L43 48.9 L42.6 50.3 L39.8 50 Z"/>
+  <path fill="#FFFFFF" d="M61 49.6 L64 49.1 L63.7 50.5 L61 50.8 Z"/>
+  <path fill="none" stroke="#05030A" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" d="M22 90 L41 77 L52 83 L77 64"/>
+  <path fill="none" stroke="#FF2E88" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" d="M22 90 L41 77 L52 83 L77 64"/>
+  <path fill="#FF2E88" stroke="#05030A" stroke-width="2" stroke-linejoin="round" d="M88 56 L70 59 L81 71 Z"/>
+  <path fill="#FFE14D" d="M86 22 L88 27 L93 28 L88 30 L86 35 L84 30 L79 28 L84 27 Z"/>
+</svg>

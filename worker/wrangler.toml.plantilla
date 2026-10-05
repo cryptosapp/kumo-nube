@@ -1,0 +1,9 @@
+# Lo completa el workflow «Instalar Kumo» con tus datos. No edites a mano.
+name = "kumo-bot"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+workers_dev = true
+
+[[kv_namespaces]]
+binding = "KUMO"
+id = "__KV_ID__"

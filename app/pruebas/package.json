@@ -1,0 +1,1 @@
+{ "private": true, "scripts": { "test": "node ui.test.js" }, "dependencies": { "jsdom": "*", "tweetnacl": "1.0.3", "blakejs": "1.2.1" } }

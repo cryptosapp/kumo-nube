@@ -1,0 +1,1393 @@
+<!DOCTYPE html>
+<html lang="es" data-tema="pro" data-estilo="pro">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d14">
+<title>Kumo Bot</title>
+<style>
+/* ============ Temas ============ */
+:root,html[data-tema="noche"]{
+  --bg:#0d0718;--panel:#160d29;--panel2:#1f1338;--line:#3b2868;--text:#f4efff;--muted:#a99cc9;
+  --acento:#ff2e88;--acento2:#00e5ff;--up:#00e5ff;--down:#ff4d6d;--warn:#ffe14d;--tinta:#05030a;
+  --sombra:#ff2e88;--sobre-acento:#12061f;--dot:rgba(255,46,136,.10);--rayas:rgba(0,229,255,.06);
+  --barra:#0d0718;color-scheme:dark;
+}
+html[data-tema="dia"]{
+  --bg:#fff7ea;--panel:#ffffff;--panel2:#fff0f6;--line:#16101f;--text:#16101f;--muted:#5f5677;
+  --acento:#e0006e;--acento2:#0090b0;--up:#007f9e;--down:#d61a45;--warn:#a87800;--tinta:#16101f;
+  --sombra:#16101f;--sobre-acento:#ffffff;--dot:rgba(22,16,31,.09);--rayas:rgba(224,0,110,.06);
+  --barra:#fff7ea;color-scheme:light;
+}
+html[data-tema="clasica"]{
+  --bg:#0a0f0d;--panel:#111a16;--panel2:#16221c;--line:#26372e;--text:#edf7f0;--muted:#8ba095;
+  --acento:#5eeec8;--acento2:#5eeec8;--up:#5eeec8;--down:#ff7080;--warn:#e8c66b;--tinta:#26372e;
+  --sombra:transparent;--sobre-acento:#06130e;--dot:transparent;--rayas:transparent;
+  --barra:#0a0f0d;color-scheme:dark;
+}
+*{box-sizing:border-box;min-width:0}
+html,body{overflow-x:hidden}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,Roboto,"Segoe UI",sans-serif;-webkit-tap-highlight-color:transparent}
+html[data-estilo="manga"] body{background:radial-gradient(var(--dot) 1.1px,transparent 1.4px) 0 0/9px 9px,var(--bg)}
+html[data-tema="clasica"] body{font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+h1,h2,h3{margin:0;font-weight:800}
+.titulo,h1,h2{font-family:"sans-serif-condensed","Roboto Condensed","Arial Narrow",system-ui,sans-serif}
+html[data-estilo="manga"] h1,html[data-estilo="manga"] h2{font-style:italic;font-weight:900;letter-spacing:.01em;text-transform:uppercase}
+html[data-tema="clasica"] h1,html[data-tema="clasica"] h2{font-family:inherit}
+h1{font-size:20px}h2{font-size:19px}h3{font-size:14px}
+small{color:var(--muted);font-size:11px}
+a{color:var(--acento2)}
+button,input,select{font:inherit;color:var(--text)}
+button{border:2px solid var(--line);background:var(--panel2);padding:10px 12px;border-radius:4px;cursor:pointer;font-weight:700}
+button:active{transform:translate(2px,2px)}
+button:disabled{opacity:.45}
+input,select{width:100%;background:var(--bg);border:2px solid var(--line);border-radius:4px;padding:10px}
+input:focus,select:focus{outline:2px solid var(--acento2);outline-offset:1px}
+.primary{background:var(--acento);border-color:var(--tinta);color:var(--sobre-acento);text-transform:uppercase;letter-spacing:.04em}
+html[data-estilo="manga"] .primary{box-shadow:3px 3px 0 var(--acento2)}
+html[data-estilo="manga"] .primary:active{box-shadow:1px 1px 0 var(--acento2)}
+.secundario{border-color:var(--acento2);color:var(--acento2);background:transparent}
+.danger{background:transparent;border-color:var(--down);color:var(--down)}
+.ghost{background:transparent}
+.small{padding:6px 9px;font-size:11px}
+.eyebrow,.label{display:block;font-size:10px;color:var(--muted);letter-spacing:.12em;text-transform:uppercase;font-weight:700}
+.kata{color:var(--acento);margin-right:6px;letter-spacing:.2em}
+.up{color:var(--up)}.down{color:var(--down)}.warn-text{color:var(--warn)}.muted{color:var(--muted)}
+.oculto{display:none!important}
+
+/* ============ Estructura ============ */
+.topbar{position:sticky;top:0;z-index:5;background:var(--bg);display:flex;align-items:center;justify-content:space-between;gap:10px;padding:calc(10px + env(safe-area-inset-top)) 16px 10px;border-bottom:2px solid var(--line)}
+.marca{display:flex;align-items:center;gap:9px}
+.marca svg{width:38px;height:38px;flex:none}
+.logo-txt{font-size:22px;line-height:1}
+html[data-tema="noche"] .logo-txt{text-shadow:2px 0 var(--acento),-2px 0 var(--acento2)}
+.topbar .right{display:flex;flex-direction:column;align-items:flex-end;gap:4px}
+.screen{display:none;padding:16px 16px calc(96px + env(safe-area-inset-bottom));max-width:760px;margin:auto}
+.screen.active{display:block}
+.nav{position:fixed;z-index:10;bottom:0;left:0;right:0;background:var(--bg);border-top:2px solid var(--line);display:flex;justify-content:center;padding:6px 4px max(6px,env(safe-area-inset-bottom))}
+.nav button{flex:1;max-width:96px;border:0;background:transparent;color:var(--muted);padding:6px 2px;font-size:18px;line-height:1;border-radius:4px}
+.nav button small{display:block;font-size:10px;margin-top:4px;color:inherit;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:700}
+.nav button.active{color:var(--acento)}
+html[data-estilo="manga"] .nav button.active{background:var(--acento);color:var(--sobre-acento)}
+.section-head{display:flex;justify-content:space-between;align-items:flex-end;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+.panel{background:var(--panel);border:2px solid var(--line);border-radius:4px;padding:13px;margin-bottom:12px}
+html[data-estilo="manga"] .panel{border-color:var(--tinta);box-shadow:4px 4px 0 var(--sombra)}
+html[data-tema="noche"] .panel{border-color:var(--line)}
+.panel-title{display:flex;justify-content:space-between;align-items:center;gap:8px;color:var(--muted);font-size:11px;text-transform:uppercase;font-weight:800;letter-spacing:.08em;margin-bottom:10px;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;gap:5px;border:2px solid currentColor;border-radius:999px;padding:3px 9px;font-size:10px;font-weight:800;color:var(--up);white-space:nowrap;text-transform:uppercase}
+.pill.warn{color:var(--warn)}.pill.bad{color:var(--down)}.pill.acento{color:var(--acento)}
+.pill i{width:6px;height:6px;border-radius:50%;background:currentColor}
+.pill.live i{animation:latido 1.6s ease-in-out infinite}
+@keyframes latido{0%,100%{opacity:1}50%{opacity:.25}}
+.hero{position:relative;overflow:hidden}
+html[data-estilo="manga"] .hero::before{content:"";position:absolute;inset:-50%;background:repeating-conic-gradient(from 0deg at 70% 40%,var(--rayas) 0 4deg,transparent 4deg 12deg);pointer-events:none}
+.hero>*{position:relative}
+.hero strong{display:block;font-size:clamp(30px,9vw,40px);letter-spacing:-.02em;margin:4px 0 2px;font-family:"sans-serif-condensed","Roboto Condensed",system-ui,sans-serif;font-weight:900}
+#chart{display:block;width:100%;height:110px;margin-top:6px}
+.grid{display:grid;gap:8px}
+.grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}
+.grid.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.metric{background:var(--panel2);border:2px solid var(--line);border-radius:4px;padding:9px}
+.metric span{display:block;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;font-weight:700}
+.metric b{display:block;margin-top:4px;font-size:14px;overflow-wrap:anywhere}
+.row{border-top:1px dashed var(--line);padding:10px 0;display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+.row:first-child{border-top:0;padding-top:2px}
+.row .info{flex:1}
+.row small{display:block;margin-top:2px;overflow-wrap:anywhere}
+.notice{border-left:4px solid var(--acento2);background:var(--panel2);padding:9px 11px;border-radius:3px;font-size:12px;line-height:1.5;margin:9px 0 0;overflow-wrap:anywhere}
+.notice.bad{border-left-color:var(--down)}
+.notice.warn{border-left-color:var(--warn)}
+.empty{color:var(--muted);padding:6px 0;margin:0}
+.form{display:grid;gap:10px}
+.form label{display:grid;gap:5px;font-size:12px;font-weight:700}
+.form label small{font-weight:400}
+.check{display:flex!important;align-items:center;gap:8px;grid-template-columns:none!important}
+.check input{width:auto;accent-color:var(--acento)}
+.bar{height:7px;background:var(--bg);border:1px solid var(--line);border-radius:9px;overflow:hidden;position:relative;margin-top:5px}
+.bar i{position:absolute;left:0;top:0;bottom:0;background:var(--acento2)}
+.bar em{position:absolute;top:-2px;bottom:-2px;width:3px;background:var(--acento)}
+.badge{display:inline-block;border:2px solid currentColor;border-radius:3px;padding:2px 6px;font-size:10px;font-weight:900;letter-spacing:.05em;white-space:nowrap}
+.badge.buy{color:var(--up)}.badge.sell{color:var(--down)}.badge.wait{color:var(--warn)}.badge.off{color:var(--muted)}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chips button{padding:6px 11px;font-size:11px;border-radius:999px;color:var(--muted)}
+.chips button.active{color:var(--sobre-acento);background:var(--acento);border-color:var(--tinta)}
+.card{background:var(--panel2);border:2px solid var(--line);border-radius:4px;padding:11px;margin-bottom:8px}
+.card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.card-head b{font-size:16px}
+.kv{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-top:8px}
+.kv div{font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700}
+.kv b{display:block;color:var(--text);font-size:12px;text-transform:none;margin-top:2px}
+.verd{border:2px solid currentColor;border-radius:4px;padding:10px;margin:8px 0}
+.verd b{display:block;font-size:17px;font-family:"sans-serif-condensed","Roboto Condensed",system-ui,sans-serif;font-style:italic}
+.verd.si{color:var(--up)}.verd.no{color:var(--down)}.verd.esp{color:var(--warn)}
+.verd small{color:var(--text)}
+.srch{display:grid;grid-template-columns:1fr auto;gap:6px}
+.alloc{display:grid;grid-template-columns:70px minmax(0,1fr) 80px 34px;gap:8px;align-items:center;padding:6px 0;border-top:1px dashed var(--line)}
+.alloc:first-child{border-top:0}
+.param{display:grid;grid-template-columns:minmax(0,1fr) 110px;gap:8px;align-items:center;border-top:1px dashed var(--line);padding-top:9px}
+.param:first-child{border-top:0;padding-top:0}
+.param span{font-size:12px;font-weight:700}.param small{display:block;font-weight:400}
+.danger-zone{border:2px dashed var(--down);border-radius:4px;padding:13px;margin-top:12px}
+.toast{position:fixed;left:16px;right:16px;bottom:calc(84px + env(safe-area-inset-bottom));max-width:728px;margin:auto;background:var(--panel);border:2px solid var(--acento2);padding:11px;border-radius:4px;display:none;z-index:60;font-size:13px;font-weight:700}
+html[data-estilo="manga"] .toast{box-shadow:4px 4px 0 var(--sombra)}
+.toast.bad{border-color:var(--down);color:var(--down)}
+.toast.show{display:block}
+.modal-backdrop{position:fixed;inset:0;z-index:50;background:rgba(5,3,10,.78);display:none;align-items:flex-end;justify-content:center;padding:12px 12px calc(12px + env(safe-area-inset-bottom))}
+.modal-backdrop.open{display:flex}
+.modal{width:100%;max-width:620px;max-height:88vh;overflow:auto;background:var(--panel);border:2px solid var(--tinta);border-radius:6px;padding:16px}
+html[data-estilo="manga"] .modal{box-shadow:5px 5px 0 var(--acento)}
+.modal p{white-space:pre-line;line-height:1.5;margin:10px 0 0;font-size:13px}
+.confirm-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:16px}
+.confirm-actions button{min-height:48px}
+.demo-banda{background:repeating-linear-gradient(45deg,var(--warn) 0 12px,var(--tinta) 12px 24px);color:#000;text-align:center;font-weight:900;font-size:11px;padding:3px;letter-spacing:.2em}
+.demo-banda span{background:var(--warn);padding:0 8px}
+
+/* ============ Globo de diálogo (manga) ============ */
+.globo{position:relative;background:#fff;color:#16101f;border:3px solid var(--tinta);border-radius:22px;padding:14px 16px;font-weight:700;font-size:15px;line-height:1.45;margin:16px 0 22px}
+.globo::after{content:"";position:absolute;left:36px;bottom:-17px;border:14px solid transparent;border-top-color:var(--tinta);border-bottom:0}
+.globo::before{content:"";position:absolute;left:39px;bottom:-11px;border:11px solid transparent;border-top-color:#fff;border-bottom:0;z-index:1}
+html[data-tema="noche"] .globo{border-color:#fff;box-shadow:4px 4px 0 var(--acento)}
+html[data-tema="noche"] .globo::after{border-top-color:#fff}
+
+/* ============ Bienvenida / asistente ============ */
+#onb{position:fixed;inset:0;z-index:40;background:var(--bg);overflow:auto;display:none}
+html[data-estilo="manga"] #onb{background:radial-gradient(var(--dot) 1.1px,transparent 1.4px) 0 0/9px 9px,var(--bg)}
+#onb.open{display:block}
+.onb-in{max-width:560px;margin:auto;padding:calc(18px + env(safe-area-inset-top)) 18px calc(28px + env(safe-area-inset-bottom));min-height:100%;display:flex;flex-direction:column}
+.paso{display:none;flex:1;flex-direction:column}
+.paso.activo{display:flex;animation:entra .35s ease-out}
+@keyframes entra{from{opacity:0;transform:translateX(24px) skewX(-4deg)}to{opacity:1;transform:none}}
+.onb-top{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px}
+.puntos{display:flex;gap:5px}.puntos i{width:22px;height:5px;background:var(--line);border-radius:2px}.puntos i.on{background:var(--acento)}
+.portada{position:relative;text-align:center;padding:26px 8px 8px;overflow:hidden}
+.portada::before{content:"";position:absolute;inset:-60%;background:repeating-conic-gradient(from 0deg at 50% 45%,var(--rayas) 0 3deg,transparent 3deg 9deg);animation:gira 60s linear infinite}
+@keyframes gira{to{transform:rotate(360deg)}}
+.portada>*{position:relative}
+.portada svg{width:150px;height:150px;filter:drop-shadow(6px 6px 0 var(--acento2))}
+.kanji{font-size:64px;line-height:1;font-weight:900;color:var(--acento);font-family:serif;margin-top:6px}
+html[data-tema="noche"] .kanji{text-shadow:3px 3px 0 var(--acento2)}
+.portada h1{font-size:40px;margin-top:2px}
+.portada .eyebrow{font-size:11px;margin-top:4px}
+.opciones{display:grid;gap:10px;margin:10px 0}
+.opcion{display:flex;gap:12px;align-items:center;text-align:left;padding:13px;background:var(--panel);border:2px solid var(--line);border-radius:5px;width:100%}
+.opcion.sel{border-color:var(--acento);box-shadow:4px 4px 0 var(--acento)}
+.opcion .ico{font-size:26px;width:40px;text-align:center;flex:none}
+.opcion b{display:block;font-size:15px}.opcion small{display:block;font-weight:400;margin-top:2px}
+.muestra{width:64px;height:64px;border-radius:5px;flex:none;border:2px solid #16101f;position:relative;overflow:hidden}
+.muestra.noche{background:radial-gradient(rgba(255,46,136,.35) 1px,transparent 1.5px) 0 0/6px 6px,#0d0718}
+.muestra.dia{background:radial-gradient(rgba(22,16,31,.25) 1px,transparent 1.5px) 0 0/6px 6px,#fff7ea}
+.muestra.clasica{background:#0a0f0d}
+.muestra i{position:absolute;left:8px;right:8px;height:8px;border-radius:2px}
+.muestra.noche i:nth-child(1){top:12px;background:#ff2e88}.muestra.noche i:nth-child(2){top:26px;background:#00e5ff;right:24px}.muestra.noche i:nth-child(3){top:40px;background:#3b2868}
+.muestra.dia i:nth-child(1){top:12px;background:#e0006e}.muestra.dia i:nth-child(2){top:26px;background:#0090b0;right:24px}.muestra.dia i:nth-child(3){top:40px;background:#16101f}
+.muestra.clasica i:nth-child(1){top:12px;background:#5eeec8}.muestra.clasica i:nth-child(2){top:26px;background:#26372e;right:24px}.muestra.clasica i:nth-child(3){top:40px;background:#16221c}
+.onb-pie{display:grid;grid-template-columns:auto 1fr;gap:8px;margin-top:auto;padding-top:16px}
+.onb-pie .primary{min-height:52px;font-size:15px}
+.ayuda{font-size:12px;line-height:1.55;color:var(--muted)}
+.ayuda ol{margin:6px 0 0;padding-left:18px}.ayuda li{margin-bottom:3px}
+.valida{font-size:12px;font-weight:700;min-height:18px}
+.valida.ok{color:var(--up)}.valida.bad{color:var(--down)}
+.log-inst{background:var(--panel);border:2px solid var(--line);border-radius:4px;padding:10px;font:12px/1.6 ui-monospace,Menlo,monospace;min-height:150px}
+.log-inst div::before{content:"▸ ";color:var(--acento)}
+.log-inst .ok::before{content:"✔ ";color:var(--up)}
+.log-inst .err{color:var(--down)}.log-inst .err::before{content:"✖ ";color:var(--down)}
+.boom{font-size:44px;font-weight:900;font-style:italic;color:var(--acento);text-align:center;font-family:"sans-serif-condensed","Roboto Condensed",system-ui,sans-serif;transform:rotate(-4deg);margin:10px 0}
+html[data-tema="noche"] .boom{text-shadow:3px 3px 0 var(--acento2)}
+
+/* ============ Tutorial ============ */
+#tuto{position:fixed;inset:0;z-index:45;background:rgba(5,3,10,.82);display:none;align-items:center;justify-content:center;padding:calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom))}
+#tuto.open{display:flex}
+.tuto-caja{width:100%;max-width:560px;max-height:100%;display:flex;flex-direction:column;background:var(--panel);border:3px solid var(--tinta);border-radius:8px;overflow:hidden}
+html[data-estilo="manga"] .tuto-caja{box-shadow:6px 6px 0 var(--acento)}
+html[data-tema="noche"] .tuto-caja{border-color:#fff}
+.tuto-cab{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 12px;background:var(--acento);color:var(--sobre-acento)}
+.tuto-cab b{font-family:"sans-serif-condensed","Roboto Condensed",system-ui,sans-serif;font-style:italic;font-size:16px;letter-spacing:.04em}
+.tuto-cab button{background:transparent;border:2px solid currentColor;color:inherit;padding:3px 9px}
+.tuto-cuerpo{padding:16px;overflow:auto;flex:1;font-size:14px;line-height:1.55}
+.tuto-cuerpo h2{margin:2px 0 8px}
+.tuto-cuerpo ul,.tuto-cuerpo ol{margin:8px 0;padding-left:20px}.tuto-cuerpo li{margin-bottom:6px}
+.tuto-num{display:inline-flex;align-items:center;justify-content:center;width:46px;height:46px;border-radius:50%;background:var(--acento2);color:var(--tinta);font-weight:900;font-size:22px;border:3px solid var(--tinta);float:right;margin:0 0 6px 10px;font-style:italic}
+.req{display:grid;gap:7px;margin:10px 0}
+.req div{display:flex;gap:10px;align-items:flex-start;background:var(--panel2);border:2px solid var(--line);border-radius:4px;padding:8px}
+.req div span{font-size:20px;flex:none}.req div small{display:block}
+.tuto-pie{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;padding:10px 12px;border-top:2px solid var(--line)}
+.tuto-pie .puntos{justify-content:center}
+.tuto-pie button{min-width:56px;min-height:44px}
+
+/* ============ Donaciones ============ */
+.don{display:grid;gap:10px}
+.don-card{background:var(--panel2);border:2px solid var(--line);border-radius:5px;padding:12px;text-align:center}
+.don-card .cab{display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:8px}
+.don-card .cab img{width:30px;height:30px}
+.don-card .qr{width:168px;height:168px;background:#fff;padding:6px;border-radius:4px;border:2px solid var(--tinta)}
+.dir{display:block;font:11px/1.45 ui-monospace,Menlo,monospace;word-break:break-all;background:var(--bg);border:1px dashed var(--line);border-radius:4px;padding:7px;margin:8px 0;user-select:all;-webkit-user-select:all}
+@media(min-width:560px){.don{grid-template-columns:1fr 1fr}}
+.upd-banda{display:block;width:100%;border:0;border-radius:0;background:var(--acento);color:var(--sobre-acento);font-size:12px;font-weight:800;letter-spacing:.04em;padding:9px 12px;text-align:center}
+html[data-estilo="pro"] .upd-banda{background:linear-gradient(90deg,var(--acento),#9b5cff);border-radius:0;border:0}
+.upd-notas{font-size:12px;line-height:1.5;white-space:pre-line;max-height:38vh;overflow:auto;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:9px;margin-top:10px}
+
+/* ============ Estilo Pro (Grafito / Porcelana) ============ */
+html[data-tema="pro"]{
+  --bg:#0b0d14;--panel:#12151f;--panel2:#191d2a;--line:#262b3b;--text:#e9ecf4;--muted:#8a92a8;
+  --acento:#ff4f97;--acento2:#38d4f0;--up:#2fd08c;--down:#ff6370;--warn:#f5c04e;--tinta:#262b3b;
+  --sombra:rgba(0,0,0,.35);--sobre-acento:#ffffff;--dot:transparent;--rayas:transparent;
+  --suave:rgba(255,79,151,.13);--suave2:rgba(56,212,240,.12);--glow:rgba(124,92,255,.16);
+  --barra:#0b0d14;color-scheme:dark;
+}
+html[data-tema="pro-claro"]{
+  --bg:#f5f6fa;--panel:#ffffff;--panel2:#f2f4f9;--line:#e2e5ee;--text:#151927;--muted:#5f677b;
+  --acento:#e0337c;--acento2:#0a8fb0;--up:#0f9f5c;--down:#d93a4a;--warn:#b07a00;--tinta:#e2e5ee;
+  --sombra:rgba(20,25,40,.08);--sobre-acento:#ffffff;--dot:transparent;--rayas:transparent;
+  --suave:rgba(224,51,124,.09);--suave2:rgba(10,143,176,.09);--glow:rgba(224,51,124,.08);
+  --barra:#f5f6fa;color-scheme:light;
+}
+html[data-estilo="pro"] body{font:14px/1.5 system-ui,-apple-system,Roboto,"Segoe UI",sans-serif;font-variant-numeric:tabular-nums;
+  background:radial-gradient(120% 60% at 85% -10%,var(--glow),transparent 60%) fixed,var(--bg)}
+html[data-estilo="pro"] .titulo,html[data-estilo="pro"] h1,html[data-estilo="pro"] h2{font-family:inherit;font-weight:700;letter-spacing:-.015em}
+html[data-estilo="pro"] h1{font-size:22px}html[data-estilo="pro"] h2{font-size:21px}
+html[data-estilo="pro"] a{color:var(--acento)}
+html[data-estilo="pro"] button{border:1px solid var(--line);border-radius:10px;font-weight:600;transition:background .15s,border-color .15s,transform .1s}
+html[data-estilo="pro"] button:active{transform:scale(.98)}
+html[data-estilo="pro"] input,html[data-estilo="pro"] select{border:1px solid var(--line);border-radius:10px;background:var(--panel2)}
+html[data-estilo="pro"] input:focus,html[data-estilo="pro"] select:focus{outline:0;border-color:var(--acento);box-shadow:0 0 0 3px var(--suave)}
+html[data-estilo="pro"] .primary{background:linear-gradient(135deg,var(--acento),#9b5cff);border-color:transparent;color:var(--sobre-acento);letter-spacing:.03em;box-shadow:0 6px 18px -8px var(--acento)}
+html[data-estilo="pro"] .secundario{border-color:var(--line);color:var(--acento2);background:var(--suave2)}
+html[data-estilo="pro"] .danger{background:transparent;border-color:color-mix(in srgb,var(--down) 45%,transparent)}
+html[data-estilo="pro"] .ghost{border-color:var(--line);color:var(--muted)}
+html[data-estilo="pro"] .eyebrow,html[data-estilo="pro"] .label{letter-spacing:.1em;font-weight:600}
+html[data-estilo="pro"] .kata{color:var(--muted);opacity:.7;letter-spacing:.1em}
+/* Estructura */
+html[data-estilo="pro"] .topbar{background:color-mix(in srgb,var(--bg) 82%,transparent);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+html[data-estilo="pro"] .marca svg{width:34px;height:34px;border-radius:9px}
+html[data-estilo="pro"] .logo-txt{font-size:19px;font-weight:700;letter-spacing:-.01em}
+html[data-estilo="pro"] .nav{background:color-mix(in srgb,var(--panel) 90%,transparent);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);border-top:1px solid var(--line)}
+html[data-estilo="pro"] .nav button{border:0;border-radius:12px;margin:0 2px}
+html[data-estilo="pro"] .nav button.active{color:var(--acento);background:var(--suave)}
+html[data-estilo="pro"] .nav button small{font-weight:600}
+html[data-estilo="pro"] .panel{border:1px solid var(--line);border-radius:16px;padding:15px;box-shadow:0 1px 2px var(--sombra),0 10px 28px -18px var(--sombra)}
+html[data-estilo="pro"] .panel-title{font-weight:600;letter-spacing:.06em}
+html[data-estilo="pro"] .hero{background:linear-gradient(160deg,var(--panel2),var(--panel) 65%)}
+html[data-estilo="pro"] .hero strong{font-family:inherit;font-weight:700;letter-spacing:-.03em}
+html[data-estilo="pro"] .metric,html[data-estilo="pro"] .card{border:1px solid var(--line);border-radius:12px}
+html[data-estilo="pro"] .row,html[data-estilo="pro"] .alloc,html[data-estilo="pro"] .param{border-top-style:solid}
+html[data-estilo="pro"] .pill{border:0;background:color-mix(in srgb,currentColor 14%,transparent);font-weight:700;padding:4px 10px}
+html[data-estilo="pro"] .badge{border:0;border-radius:6px;background:color-mix(in srgb,currentColor 14%,transparent);font-weight:700}
+html[data-estilo="pro"] .notice{border-left-width:3px;border-radius:10px}
+html[data-estilo="pro"] .bar{border:0;background:var(--panel2);height:6px}
+html[data-estilo="pro"] .bar i{background:linear-gradient(90deg,var(--acento2),var(--acento));border-radius:9px}
+html[data-estilo="pro"] .bar em{background:var(--text);width:2px;border-radius:2px}
+html[data-estilo="pro"] .chips button{border-color:var(--line)}
+html[data-estilo="pro"] .chips button.active{background:var(--suave);color:var(--acento);border-color:color-mix(in srgb,var(--acento) 45%,transparent)}
+html[data-estilo="pro"] .verd{border-width:1px;border-radius:12px;background:color-mix(in srgb,currentColor 8%,transparent)}
+html[data-estilo="pro"] .verd b{font-family:inherit;font-style:normal;font-weight:700}
+html[data-estilo="pro"] .danger-zone{border:1px solid color-mix(in srgb,var(--down) 40%,transparent);border-radius:14px;background:color-mix(in srgb,var(--down) 5%,transparent)}
+html[data-estilo="pro"] .toast{border:1px solid var(--line);border-left:3px solid var(--acento2);border-radius:12px;box-shadow:0 12px 32px -12px rgba(0,0,0,.45)}
+html[data-estilo="pro"] .toast.bad{border-left-color:var(--down)}
+html[data-estilo="pro"] .modal-backdrop{background:rgba(8,10,16,.6);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)}
+html[data-estilo="pro"] .modal{border:1px solid var(--line);border-radius:20px;box-shadow:0 24px 60px -20px rgba(0,0,0,.55)}
+html[data-estilo="pro"] .demo-banda{background:var(--suave2);color:var(--acento2);letter-spacing:.12em;font-weight:700}
+html[data-estilo="pro"] .demo-banda span{background:transparent}
+/* Bienvenida */
+html[data-estilo="pro"] #onb{background:radial-gradient(90% 45% at 50% 0%,var(--glow),transparent 70%),var(--bg)}
+html[data-estilo="pro"] .portada::before{inset:auto;left:50%;top:10px;width:240px;height:240px;margin-left:-120px;border-radius:50%;background:radial-gradient(circle,var(--suave),transparent 70%);animation:none}
+html[data-estilo="pro"] .portada svg{width:120px;height:120px;border-radius:28px;filter:drop-shadow(0 16px 30px rgba(255,79,151,.28))}
+html[data-estilo="pro"] .kanji{font-size:30px;color:var(--muted);text-shadow:none;margin-top:12px;font-weight:400}
+html[data-estilo="pro"] .portada h1{font-size:34px;letter-spacing:-.03em}
+html[data-estilo="pro"] .globo{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:16px 16px 16px 4px;font-weight:500;font-size:14.5px;box-shadow:0 10px 28px -18px var(--sombra)}
+html[data-estilo="pro"] .globo::before,html[data-estilo="pro"] .globo::after{display:none}
+html[data-estilo="pro"] .globo b{color:var(--acento)}
+html[data-estilo="pro"] .puntos i{height:4px;border-radius:4px}
+html[data-estilo="pro"] .paso.activo{animation:entraPro .3s ease-out}
+@keyframes entraPro{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+html[data-estilo="pro"] .opcion{border:1px solid var(--line);border-radius:14px}
+html[data-estilo="pro"] .opcion.sel{border-color:var(--acento);box-shadow:0 0 0 3px var(--suave)}
+html[data-estilo="pro"] .muestra{border:1px solid var(--line);border-radius:12px}
+html[data-estilo="pro"] .log-inst{border:1px solid var(--line);border-radius:12px}
+html[data-estilo="pro"] .boom{font-family:inherit;font-style:normal;font-weight:800;transform:none;letter-spacing:-.03em;background:linear-gradient(135deg,var(--acento),#9b5cff);-webkit-background-clip:text;background-clip:text;color:transparent;text-shadow:none}
+/* Tutorial */
+html[data-estilo="pro"] #tuto{background:rgba(8,10,16,.62);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)}
+html[data-estilo="pro"] .tuto-caja{border:1px solid var(--line);border-radius:20px;box-shadow:0 30px 70px -25px rgba(0,0,0,.6)}
+html[data-estilo="pro"] .tuto-cab{background:transparent;color:var(--text);border-bottom:1px solid var(--line);padding:12px 14px}
+html[data-estilo="pro"] .tuto-cab b{font-family:inherit;font-style:normal;font-weight:700;letter-spacing:.02em;font-size:15px}
+html[data-estilo="pro"] .tuto-cab button{border:1px solid var(--line);color:var(--muted)}
+html[data-estilo="pro"] .tuto-num{background:linear-gradient(135deg,var(--acento),#9b5cff);color:#fff;border:0;font-style:normal;font-size:19px;width:42px;height:42px}
+html[data-estilo="pro"] .req div{border:1px solid var(--line);border-radius:12px}
+html[data-estilo="pro"] .tuto-pie{border-top:1px solid var(--line)}
+/* Donaciones */
+html[data-estilo="pro"] .don-card{border:1px solid var(--line);border-radius:16px}
+html[data-estilo="pro"] .don-card .qr{border:0;border-radius:12px}
+html[data-estilo="pro"] .dir{border-style:solid;border-radius:10px}
+/* Muestras de tema */
+.muestra.pro{background:radial-gradient(80% 60% at 80% 0%,rgba(124,92,255,.35),transparent 70%),#0b0d14}
+.muestra.pro-claro{background:radial-gradient(80% 60% at 80% 0%,rgba(224,51,124,.18),transparent 70%),#f5f6fa}
+.muestra.pro i,.muestra.pro-claro i{border-radius:4px}
+.muestra.pro i:nth-child(1){top:12px;background:linear-gradient(90deg,#ff4f97,#9b5cff)}.muestra.pro i:nth-child(2){top:26px;background:#38d4f0;right:24px}.muestra.pro i:nth-child(3){top:40px;background:#262b3b}
+.muestra.pro-claro i:nth-child(1){top:12px;background:linear-gradient(90deg,#e0337c,#9b5cff)}.muestra.pro-claro i:nth-child(2){top:26px;background:#0a8fb0;right:24px}.muestra.pro-claro i:nth-child(3){top:40px;background:#e2e5ee}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="logo" viewBox="0 0 108 108">
+    <rect width="108" height="108" rx="24" fill="#120A24"/>
+    <g stroke="#00E5FF" stroke-width="1.6" stroke-linecap="round" opacity=".55"><path d="M6 40 L20 44M8 52 L19 52M102 34 L89 39M103 47 L92 48M48 6 L50 17M62 5 L60 16"/></g>
+    <path fill="#00E5FF" d="M34 71C25 71 20 65 20 58C20 51 26 46 33 47C34 37 43 31 52 33C57 26 68 25 75 32C84 31 91 38 90 47C96 49 98 56 96 62C94 67 89 71 83 71Z"/>
+    <path fill="#F6F2FF" stroke="#05030A" stroke-width="2.6" stroke-linejoin="round" d="M31 68C22 68 17 62 17 55C17 48 23 43 30 44C31 34 40 28 49 30C54 23 65 22 72 29C81 28 88 35 87 44C93 46 95 53 93 59C91 64 86 68 80 68Z"/>
+    <rect x="33" y="44" width="44" height="12" rx="6" fill="#120A24"/>
+    <path fill="#00E5FF" d="M38 47.5L51 49.5L50.5 53L39 52ZM59 49.5L72 47.5L71 52L59.5 53Z"/>
+    <path fill="#fff" d="M40 48.4L43 48.9L42.6 50.3L39.8 50ZM61 49.6L64 49.1L63.7 50.5L61 50.8Z"/>
+    <path fill="none" stroke="#05030A" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" d="M22 90L41 77L52 83L77 64"/>
+    <path fill="none" stroke="#FF2E88" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" d="M22 90L41 77L52 83L77 64"/>
+    <path fill="#FF2E88" stroke="#05030A" stroke-width="2" stroke-linejoin="round" d="M88 56L70 59L81 71Z"/>
+    <path fill="#FFE14D" d="M86 22L88 27L93 28L88 30L86 35L84 30L79 28L84 27Z"/>
+  </symbol>
+</svg>
+
+<!-- ====================== BIENVENIDA + ASISTENTE ====================== -->
+<div id="onb" role="dialog" aria-modal="true" aria-label="Bienvenida a Kumo">
+ <div class="onb-in">
+  <div class="onb-top"><div class="puntos" id="puntos"></div><button class="small ghost" id="onbSaltar">SALTAR</button></div>
+
+  <section class="paso" data-paso="hola">
+    <div class="portada">
+      <svg viewBox="0 0 108 108"><use href="#logo"/></svg>
+      <div class="kanji">雲</div>
+      <h1>KUMO BOT</h1>
+      <span class="eyebrow">クモ · TRADING CRIPTO EN TU PROPIA NUBE</span>
+    </div>
+    <div class="globo">¡Hola! Soy <b>Kumo</b> ☁️ Opero cripto por ti, 24/7, desde <b>tu propia nube</b> y con <b>tus reglas</b>. Vengo vacío: empiezo a funcionar cuando conectes <b>tus</b> cuentas y claves.</div>
+    <div class="ayuda">Proyecto abierto y gratuito. Funciona con Crypto.com, Kraken, Coinbase, MEXC, Hyperliquid (sin KYC) y más. Empieza siempre en <b>simulación</b>: nada de dinero real hasta que tú lo actives.</div>
+    <div class="onb-pie" style="grid-template-columns:1fr"><button class="primary" data-ir="tema">EMPEZAR ▶</button><button class="ghost small" data-tuto="0">📖 VER TUTORIAL</button></div>
+  </section>
+
+  <section class="paso" data-paso="tema">
+    <span class="eyebrow"><span class="kata">テーマ</span>PASO 1</span>
+    <h2>Elige tu interfaz</h2>
+    <p class="ayuda">Podrás cambiarla cuando quieras en Config.</p>
+    <div class="opciones" id="temas">
+      <button class="opcion" data-tema="pro"><span class="muestra pro"><i></i><i></i><i></i></span><span><b>Pro Grafito</b><small>Oscuro y limpio, con un toque de color. Recomendado.</small></span></button>
+      <button class="opcion" data-tema="pro-claro"><span class="muestra pro-claro"><i></i><i></i><i></i></span><span><b>Pro Porcelana</b><small>Claro y profesional, ideal a plena luz del día.</small></span></button>
+      <button class="opcion" data-tema="noche"><span class="muestra noche"><i></i><i></i><i></i></span><span><b>Neón Noche</b><small>Manga cyberpunk oscuro: tramas, neón rosa y cian.</small></span></button>
+      <button class="opcion" data-tema="dia"><span class="muestra dia"><i></i><i></i><i></i></span><span><b>Neón Día</b><small>Manga en papel claro: tinta negra y acentos neón.</small></span></button>
+      <button class="opcion" data-tema="clasica"><span class="muestra clasica"><i></i><i></i><i></i></span><span><b>Clásica</b><small>La interfaz de terminal de TradBot, verde y sobria.</small></span></button>
+    </div>
+    <div class="onb-pie"><button data-ir="hola">◀</button><button class="primary" data-ir="inicio">SIGUIENTE ▶</button></div>
+  </section>
+
+  <section class="paso" data-paso="inicio">
+    <span class="eyebrow"><span class="kata">スタート</span>PASO 2</span>
+    <h2>¿Cómo empiezas?</h2>
+    <div class="opciones">
+      <button class="opcion" data-ir="gh"><span class="ico">☁️</span><span><b>Crear mi nube</b><small>Te guío paso a paso. Usa tus cuentas gratis de GitHub y Cloudflare. ~10 min.</small></span></button>
+      <button class="opcion" data-ir="conectar"><span class="ico">🔗</span><span><b>Ya tengo una nube</b><small>Conecta este teléfono con la dirección y el token de tu nube.</small></span></button>
+      <button class="opcion" id="onbDemo"><span class="ico">🎮</span><span><b>Probar en modo demo</b><small>Mira cómo funciona con datos de ejemplo, sin cuentas.</small></span></button>
+    </div>
+    <div class="onb-pie"><button data-ir="tema">◀</button><button class="secundario" data-tuto="1">📖 ¿QUÉ NECESITO?</button></div>
+  </section>
+
+  <section class="paso" data-paso="conectar">
+    <span class="eyebrow"><span class="kata">リンク</span>CONECTAR</span>
+    <h2>Conectar mi nube</h2>
+    <div class="form" style="margin-top:12px">
+      <label>Dirección de tu nube<input id="cUrl" placeholder="https://kumo-bot.tu-nombre.workers.dev" inputmode="url" autocomplete="off"></label>
+      <label>Token de la app<small>Está en el teléfono donde instalaste la nube: Config → Conexión.</small><input id="cToken" type="password" autocomplete="off"></label>
+      <div id="cValida" class="valida"></div>
+    </div>
+    <div class="onb-pie"><button data-ir="inicio">◀</button><button class="primary" id="cProbar">CONECTAR</button></div>
+  </section>
+
+  <section class="paso" data-paso="gh">
+    <span class="eyebrow"><span class="kata">ギットハブ</span>NUBE 1/5 · GITHUB</span>
+    <h2>Tu cuenta de GitHub</h2>
+    <div class="globo">GitHub ejecuta mi cerebro cada 30 min, gratis, en un repositorio <b>privado</b> tuyo, y guarda tus claves cifradas.</div>
+    <div class="ayuda"><ol>
+      <li>Crea una cuenta gratis en GitHub si no tienes.</li>
+      <li>Toca <a href="#" data-url="https://github.com/settings/tokens/new?scopes=repo,workflow&amp;description=Kumo%20Bot">CREAR TOKEN</a>: ya vienen marcados <b>repo</b> y <b>workflow</b>. Elige una caducidad y pulsa «Generate token».</li>
+      <li>Copia el token (empieza por <code>ghp_</code>) y pégalo aquí.</li>
+    </ol></div>
+    <div class="form" style="margin-top:10px"><label>Token de GitHub<input id="ghToken" type="password" autocomplete="off" placeholder="ghp_…"></label><div id="ghValida" class="valida"></div></div>
+    <div class="onb-pie"><button data-ir="inicio">◀</button><button class="primary" id="ghSig">VALIDAR ▶</button></div>
+  </section>
+
+  <section class="paso" data-paso="cf">
+    <span class="eyebrow"><span class="kata">クラウド</span>NUBE 2/5 · CLOUDFLARE</span>
+    <h2>Tu cuenta de Cloudflare</h2>
+    <div class="globo">Aquí vive tu nube: guarda la configuración y responde a esta app. El plan gratis alcanza de sobra.</div>
+    <div class="ayuda"><ol>
+      <li>Crea una cuenta gratis en Cloudflare.</li>
+      <li>Abre <a href="#" data-url="https://dash.cloudflare.com/profile/api-tokens">API TOKENS</a> → <b>Create Token</b> → plantilla <b>«Edit Cloudflare Workers»</b> → en <i>Account Resources</i> elige tu cuenta → <b>Create Token</b>.</li>
+      <li>Copia el token y pégalo aquí. La cuenta la detecto yo.</li>
+    </ol></div>
+    <div class="form" style="margin-top:10px">
+      <label>Token de Cloudflare<input id="cfToken" type="password" autocomplete="off"></label>
+      <label id="cfCuentaL" class="oculto">Cuenta<select id="cfCuenta"></select></label>
+      <div id="cfValida" class="valida"></div>
+    </div>
+    <div class="onb-pie"><button data-ir="gh">◀</button><button class="primary" id="cfSig">VALIDAR ▶</button></div>
+  </section>
+
+  <section class="paso" data-paso="groq">
+    <span class="eyebrow"><span class="kata">エーアイ</span>NUBE 3/5 · IA GROQ</span>
+    <h2>Tu IA (Groq)</h2>
+    <div class="globo">Con Groq reviso cada operación con IA antes de ejecutarla y analizo monedas en el Radar. Es gratis.</div>
+    <div class="ayuda"><ol>
+      <li>Entra a <a href="#" data-url="https://console.groq.com/keys">GROQ KEYS</a> con tu cuenta de Google o correo.</li>
+      <li><b>Create API Key</b>, copia la clave (empieza por <code>gsk_</code>) y pégala.</li>
+    </ol>Opcional: sin IA el bot opera solo con reglas técnicas.</div>
+    <div class="form" style="margin-top:10px"><label>Clave de Groq<input id="groqKey" type="password" autocomplete="off" placeholder="gsk_…"></label><div id="groqValida" class="valida"></div></div>
+    <div class="onb-pie"><button data-ir="cf">◀</button><button class="primary" id="groqSig">VALIDAR ▶</button></div>
+    <button class="ghost small" id="groqSaltar" style="margin-top:8px">SEGUIR SIN IA</button>
+  </section>
+
+  <section class="paso" data-paso="ex">
+    <span class="eyebrow"><span class="kata">取引所</span>NUBE 4/5 · EXCHANGE</span>
+    <h2>Tu exchange</h2>
+    <div class="form" style="margin-top:10px">
+      <label>Exchange<select id="exId"></select></label>
+      <label id="exOtroL" class="oculto">Id de ccxt<small>Lista: github.com/ccxt/ccxt (columna «id»).</small><input id="exOtro" placeholder="bitfinex, htx, …" autocomplete="off"></label>
+      <div id="exNota" class="notice"></div>
+      <label>Moneda base (con la que compras)<select id="exQuote"></select></label>
+      <label class="check"><input type="checkbox" id="exSinClaves"> Empezar sin claves (solo simulación con precios reales)</label>
+      <div id="exClaves" class="form">
+        <div class="notice warn">Crea la clave <b>solo con permiso de lectura y trading. NUNCA con retiros.</b> Se guarda cifrada en tu GitHub y solo la usa tu bot.</div>
+        <label><span id="exKeyT">API key</span><input id="exKey" type="password" autocomplete="off"></label>
+        <label><span id="exSecretT">Secret</span><small id="exSecretA">El secret es obligatorio: firma cada orden. Se muestra una sola vez al crear la clave.</small><input id="exSecret" type="password" autocomplete="off"></label>
+        <label id="exPassL" class="oculto">Passphrase<input id="exPass" type="password" autocomplete="off"></label>
+      </div>
+      <div id="exValida" class="valida"></div>
+    </div>
+    <div class="onb-pie"><button data-ir="groq">◀</button><button class="primary" id="exSig">SIGUIENTE ▶</button></div>
+  </section>
+
+  <section class="paso" data-paso="resumen">
+    <span class="eyebrow"><span class="kata">発進</span>NUBE 5/5 · INSTALAR</span>
+    <h2>¡Listo para despegar!</h2>
+    <div id="resumen" class="panel" style="margin-top:12px"></div>
+    <details class="ayuda"><summary>Opciones avanzadas</summary>
+      <div class="form" style="margin-top:8px">
+        <label>Plantilla (repositorio abierto)<input id="plantilla" autocomplete="off"></label>
+        <label>Nombre de tu repositorio<input id="repoNombre" autocomplete="off"></label>
+      </div>
+    </details>
+    <div id="instLog" class="log-inst oculto" aria-live="polite"></div>
+    <div class="onb-pie"><button data-ir="ex" id="resAtras">◀</button><button class="primary" id="instalar">☁️ CREAR MI NUBE</button></div>
+  </section>
+
+  <section class="paso" data-paso="fin">
+    <div class="portada"><svg viewBox="0 0 108 108"><use href="#logo"/></svg></div>
+    <div class="boom">¡NUBE ONLINE!</div>
+    <div class="globo" id="finTexto">Ya estoy vivo en tu nube. Empiezo en <b>simulación</b>: mira cómo opero y, cuando confíes en mí, activa el dinero real en Config.</div>
+    <div class="onb-pie" style="grid-template-columns:1fr"><button class="primary" id="finEntrar">ENTRAR ▶</button></div>
+  </section>
+ </div>
+</div>
+
+
+<!-- ====================== TUTORIAL ====================== -->
+<div id="tuto" role="dialog" aria-modal="true" aria-label="Tutorial de Kumo">
+  <div class="tuto-caja">
+    <div class="tuto-cab"><b>📖 TUTORIAL · <span id="tutoN">1</span>/<span id="tutoT">6</span></b><button id="tutoCerrar" aria-label="Cerrar tutorial">✕</button></div>
+    <div class="tuto-cuerpo" id="tutoCuerpo"></div>
+    <div class="tuto-pie"><button id="tutoAtras">◀</button><div class="puntos" id="tutoPuntos"></div><button id="tutoSig" class="primary">▶</button></div>
+  </div>
+</div>
+
+<!-- ====================== APP ====================== -->
+<button id="updBanda" class="upd-banda oculto"></button>
+<div id="demoBanda" class="demo-banda oculto"><span>MODO DEMO · DATOS DE EJEMPLO</span></div>
+<header class="topbar">
+  <div class="marca"><svg viewBox="0 0 108 108" aria-hidden="true"><use href="#logo"/></svg><div><span class="eyebrow" id="topEx">TU NUBE</span><h1 class="logo-txt">KUMO</h1></div></div>
+  <div class="right"><span id="conn" class="pill warn"><i></i><span>CONECTANDO</span></span><span id="modoPill" class="pill acento">—</span></div>
+</header>
+
+<main id="app">
+<section id="panel" class="screen active" aria-label="Panel">
+  <div class="panel hero">
+    <span class="label">VALOR TOTAL</span>
+    <strong id="total">—</strong>
+    <span id="delta" class="muted">—</span>
+    <svg id="chart" viewBox="0 0 600 140" preserveAspectRatio="none" role="img" aria-label="Evolución de la cartera">
+      <path id="chArea" fill="var(--acento2)" opacity=".14"/><path id="chLinea" fill="none" stroke="var(--acento2)" stroke-width="2.5" vector-effect="non-scaling-stroke"/>
+    </svg>
+    <small id="actualizado">—</small>
+  </div>
+  <div id="erroresAviso" class="notice bad oculto"></div>
+  <div class="panel">
+    <div class="panel-title"><span>Ciclo en la nube</span><span id="estadoPill" class="pill">—</span></div>
+    <div class="grid two">
+      <div class="metric"><span>Último ciclo</span><b id="ultCiclo">—</b></div>
+      <div class="metric"><span>Próximo</span><b id="proxCiclo">—</b></div>
+      <div class="metric"><span>Libre para comprar</span><b id="libre">—</b></div>
+      <div class="metric"><span>IA</span><b id="iaModelo">—</b></div>
+    </div>
+    <div class="grid two" style="margin-top:9px"><button id="cicloAhora" class="primary">▶ CICLO AHORA</button><button id="pausaBtn" class="danger">PAUSAR</button></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title"><span>Último ciclo · decisiones</span></div>
+    <div id="decisiones"><p class="empty">—</p></div>
+  </div>
+</section>
+
+<section id="radar" class="screen" aria-label="Radar">
+  <div class="section-head"><div><span class="eyebrow"><span class="kata">レーダー</span>ESCÁNER</span><h2>Radar</h2></div><span id="radarTs" class="pill warn">—</span></div>
+  <div class="panel">
+    <form id="radarForm" class="srch" autocomplete="off"><input id="radarQ" placeholder="Buscar moneda: SOL, PEPE…" maxlength="12"><button class="primary" type="submit">BUSCAR</button></form>
+    <div id="radarAnalisis"></div>
+  </div>
+  <div class="chips" id="radarFiltro" style="margin-bottom:10px"><button data-f="todas" class="active">TODAS</button><button data-f="baratas">RSI BAJO</button><button data-f="alza">AL ALZA</button><button data-f="mias">EN CARTERA</button></div>
+  <div id="radarLista"><p class="empty">—</p></div>
+  <p class="notice">Monedas con más volumen de tu exchange (velas diarias). Se actualiza en cada ciclo. No es asesoría financiera.</p>
+</section>
+
+<section id="ia" class="screen" aria-label="IA">
+  <div class="section-head"><div><span class="eyebrow"><span class="kata">エーアイ</span>INTELIGENCIA</span><h2>IA y bitácora</h2></div><span id="iaModo" class="pill">—</span></div>
+  <div class="panel"><div class="panel-title"><span>Opiniones de la IA (último ciclo)</span></div><div id="opiniones"><p class="empty">—</p></div></div>
+  <div class="panel"><div class="panel-title"><span>Notas del bot</span></div><div id="notas"><p class="empty">—</p></div></div>
+  <div class="panel"><div class="panel-title"><span>Bitácora de avisos</span><button id="bitRefresh" class="small">ACTUALIZAR</button></div><div id="bitacora"><p class="empty">—</p></div></div>
+</section>
+
+<section id="cartera" class="screen" aria-label="Cartera">
+  <div class="section-head"><div><span class="eyebrow"><span class="kata">財布</span>PORTAFOLIO</span><h2>Cartera</h2></div></div>
+  <div class="panel"><div class="panel-title"><span>Activos · barra = peso, marca = objetivo</span></div><div id="activos"><p class="empty">—</p></div></div>
+  <div class="panel"><div class="panel-title"><span>Operaciones</span><span id="opsCuenta" class="pill">0</span></div><div id="operaciones"><p class="empty">—</p></div></div>
+</section>
+
+<section id="estrategia" class="screen" aria-label="Estrategia">
+  <div class="section-head"><div><span class="eyebrow"><span class="kata">戦略</span>REGLAS</span><h2>Estrategia</h2></div><button id="estGuardar" class="primary">GUARDAR</button></div>
+  <div class="panel">
+    <div class="panel-title"><span>Perfiles rápidos</span></div>
+    <div class="chips" id="perfiles"><button data-p="prudente">🛡 PRUDENTE</button><button data-p="equilibrado">⚖ EQUILIBRADO</button><button data-p="activo">⚡ ACTIVO</button></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title"><span>Reparto objetivo</span><span id="repSuma" class="pill">0%</span></div>
+    <p class="muted" style="margin:0 0 8px;font-size:12px">Lo que no asignes queda en tu moneda base. Máximo 100%.</p>
+    <div id="reparto"></div>
+    <div class="srch" style="margin-top:9px"><input id="repNuevo" placeholder="AGREGAR MONEDA" maxlength="12"><button id="repAgregar" class="small">AGREGAR</button></div>
+  </div>
+  <div class="panel"><div class="panel-title"><span>Parámetros</span></div><div id="params" class="form"></div></div>
+</section>
+
+<section id="config" class="screen" aria-label="Config">
+  <div class="section-head"><div><span class="eyebrow"><span class="kata">設定</span>AJUSTES</span><h2>Config</h2></div></div>
+  <div class="panel">
+    <div class="panel-title"><span>Interfaz</span></div>
+    <div class="chips" id="temaChips"><button data-tema="pro">PRO GRAFITO</button><button data-tema="pro-claro">PRO PORCELANA</button><button data-tema="noche">NEÓN NOCHE</button><button data-tema="dia">NEÓN DÍA</button><button data-tema="clasica">CLÁSICA</button></div>
+    <div class="grid two" style="margin-top:8px"><button id="verBienvenida" class="small ghost">VER BIENVENIDA</button><button class="small ghost" data-tuto="0">📖 TUTORIAL</button></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title"><span>Modo de operación</span><span id="modoCfg" class="pill">—</span></div>
+    <p class="muted" style="margin:0;font-size:12px" id="modoTexto">—</p>
+    <div class="grid two" style="margin-top:9px"><button id="modoBtn" class="primary">—</button><button id="reiniciarSim" class="secundario">REINICIAR SIMULACIÓN</button></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title"><span>Notificaciones</span><span id="avisosPill" class="pill warn">—</span></div>
+    <p class="muted" style="margin:0;font-size:12px">Compras, ventas y alertas de tu nube. El teléfono las revisa cada ~15 min, aunque la app esté cerrada.</p>
+    <div class="grid two" style="margin-top:9px"><button id="avisosBtn" class="primary">ACTIVAR</button><button id="avisosProbar">PROBAR</button></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title"><span>Mi nube</span><span id="nubeVer" class="pill">—</span></div>
+    <div class="form">
+      <label>Dirección<input id="cfgUrl" readonly></label>
+      <label>Token de la app<small>Úsalo para conectar otro teléfono. No lo compartas.</small><input id="cfgToken" type="password" readonly></label>
+      <div class="grid two"><button id="verToken" class="small">MOSTRAR TOKEN</button><button id="copiarToken" class="small">COPIAR</button></div>
+    </div>
+    <div id="repoInfo" class="notice" style="margin-top:9px">—</div>
+    <div class="grid two" style="margin-top:9px"><button id="cambiarClaves">CAMBIAR CLAVES</button><button id="actualizarNube">ACTUALIZAR NUBE</button></div>
+    <button id="olvidarGh" class="small ghost" style="margin-top:8px;width:100%">OLVIDAR TOKEN DE GITHUB EN ESTE TELÉFONO</button>
+  </div>
+  <div class="panel">
+    <div class="panel-title"><span>Acerca de</span></div>
+    <div class="grid two"><div class="metric"><span>App</span><b id="appVer">—</b></div><div class="metric"><span>Nube</span><b id="nubeVer2">—</b></div></div>
+    <p class="notice">Kumo Bot es software libre (MIT). Código: <a href="#" data-url="https://github.com/tradiabot/kumo-bot">github.com/tradiabot/kumo-bot</a>. Trading con riesgo: usa solo dinero que puedas perder.</p>
+    <div class="grid two" style="margin-top:9px"><button class="small" id="buscarUpd">BUSCAR ACTUALIZACIÓN</button><button class="small ghost" id="verNovedades">NOVEDADES</button></div>
+    <small id="updEstado" style="display:block;margin-top:6px">—</small>
+    <button class="small secundario" id="irDonar" style="margin-top:9px;width:100%">☕ DONAR AL DESARROLLADOR</button>
+  </div>
+  <div class="panel" id="donar">
+    <div class="panel-title"><span>☕ Apoya al desarrollador</span><span class="pill acento">VOLUNTARIO</span></div>
+    <p class="muted" style="margin:0 0 10px;font-size:12px">Kumo es gratis y abierto. Si te sirve, puedes invitar un café al desarrollador. Envía cada moneda <b>solo por su propia red</b>.</p>
+    <div class="don">
+      <div class="don-card"><div class="cab"><img src="donar/bitcoin.svg" alt=""><b>Bitcoin (BTC)</b></div>
+        <img class="qr" src="donar/qr-bitcoin.svg" alt="Código QR de la dirección Bitcoin">
+        <code class="dir" id="dirBtc">bc1qd9j45f4t0jwyhjhqh2kvz2cr7k8xye460rr2y7</code>
+        <div class="grid two"><button class="small" data-copiar="dirBtc">COPIAR</button><button class="small primary" data-billetera="bitcoin:bc1qd9j45f4t0jwyhjhqh2kvz2cr7k8xye460rr2y7">BILLETERA</button></div></div>
+      <div class="don-card"><div class="cab"><img src="donar/monero.svg" alt=""><b>Monero (XMR)</b></div>
+        <img class="qr" src="donar/qr-monero.svg" alt="Código QR de la dirección Monero">
+        <code class="dir" id="dirXmr">447gTj6Hg6gaAEAUmjqfhqDZr1PziUTvbT4LYLpmLVnTNVFK6cqeqPfh6P4neMKLWX5jDXAr94fWHacJwDvjmCzBBH8wPBt</code>
+        <div class="grid two"><button class="small" data-copiar="dirXmr">COPIAR</button><button class="small primary" data-billetera="monero:447gTj6Hg6gaAEAUmjqfhqDZr1PziUTvbT4LYLpmLVnTNVFK6cqeqPfh6P4neMKLWX5jDXAr94fWHacJwDvjmCzBBH8wPBt">BILLETERA</button></div></div>
+    </div>
+    <p class="ayuda" style="margin:10px 0 0">¡Gracias! ありがとう 🙏</p>
+  </div>
+  <div class="danger-zone">
+    <div class="panel-title"><span class="down">Zona de peligro</span></div>
+    <button id="olvidarTodo" class="danger" style="width:100%">DESCONECTAR ESTE TELÉFONO</button>
+  </div>
+</section>
+</main>
+
+<nav class="nav" aria-label="Secciones">
+  <button class="active" data-target="panel">⌂<small>Panel</small></button>
+  <button data-target="radar">⌖<small>Radar</small></button>
+  <button data-target="ia">◎<small>IA</small></button>
+  <button data-target="cartera">◈<small>Cartera</small></button>
+  <button data-target="estrategia">◇<small>Estrategia</small></button>
+  <button data-target="config">⚙<small>Config</small></button>
+</nav>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<div id="modal" class="modal-backdrop" role="dialog" aria-modal="true">
+  <div class="modal"><h2 id="mTitulo">Confirmar</h2><p id="mTexto"></p><div id="mExtra"></div>
+    <div class="confirm-actions"><button id="mNo">CANCELAR</button><button id="mSi" class="primary">CONFIRMAR</button></div></div>
+</div>
+
+<script src="sellar.js"></script>
+<script>
+(function(){
+'use strict';
+var APP_VERSION='1.2.0';
+var PLANTILLA='tradiabot/kumo-bot';
+var NATIVO=window.KumoNative||null;
+var $=function(id){return document.getElementById(id)};
+var esc=function(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})};
+
+// ---------------------------------------------------------------- Estado local
+var S=(function(){try{return JSON.parse(localStorage.getItem('kumo')||'{}')}catch(e){return {}}})();
+function guardarS(){try{localStorage.setItem('kumo',JSON.stringify(S))}catch(e){}}
+var datos={estado:null,ops:[],radar:null,config:null,rangos:null};
+
+// ---------------------------------------------------------------- Tema
+var COLOR_BARRA={pro:['#0b0d14',false],'pro-claro':['#f5f6fa',true],noche:['#0d0718',false],dia:['#fff7ea',true],clasica:['#0a0f0d',false]};
+function aplicarTema(t){
+  if(!COLOR_BARRA[t])t='pro';
+  S.tema=t;guardarS();
+  var h=document.documentElement;h.setAttribute('data-tema',t);h.setAttribute('data-estilo',t==='clasica'?'clasica':/^pro/.test(t)?'pro':'manga');
+  var m=document.querySelector('meta[name="theme-color"]');if(m)m.content=COLOR_BARRA[t][0];
+  if(NATIVO&&NATIVO.barras)try{NATIVO.barras(COLOR_BARRA[t][0],COLOR_BARRA[t][1])}catch(e){}
+  document.querySelectorAll('[data-tema]').forEach(function(b){if(b!==h)b.classList.toggle(b.classList.contains('opcion')?'sel':'active',b.getAttribute('data-tema')===t)});
+}
+
+// ---------------------------------------------------------------- UI utilidades
+var toastT;
+function toast(msg,mal){var t=$('toast');t.textContent=msg;t.className='toast show'+(mal?' bad':'');clearTimeout(toastT);toastT=setTimeout(function(){t.className='toast'},4200)}
+function confirmar(titulo,texto,si,extraHtml){
+  return new Promise(function(res){
+    $('mTitulo').textContent=titulo;$('mTexto').textContent=texto;$('mExtra').innerHTML=extraHtml||'';$('mSi').textContent=si||'CONFIRMAR';
+    $('modal').classList.add('open');
+    function fin(v){$('modal').classList.remove('open');$('mSi').onclick=$('mNo').onclick=null;res(v)}
+    $('mSi').onclick=function(){fin(true)};$('mNo').onclick=function(){fin(false)};
+  });
+}
+function abrirUrl(u){if(NATIVO&&NATIVO.abrirUrl)NATIVO.abrirUrl(u);else window.open(u,'_blank','noopener')}
+document.addEventListener('click',function(e){var a=e.target.closest('[data-url]');if(a){e.preventDefault();abrirUrl(a.getAttribute('data-url'))}});
+function num(v,d){var n=Number(v);if(!isFinite(n))return '—';return n.toLocaleString('es',{maximumFractionDigits:d==null?2:d,minimumFractionDigits:0})}
+function precio(v){var n=Number(v);if(!isFinite(n)||!n)return '—';return n>=1000?num(n,0):n>=1?num(n,2):n>=0.01?num(n,4):num(n,8)}
+function pct(v){if(v==null||!isFinite(v))return '—';return (v>0?'+':'')+num(v,2)+'%'}
+function clsPct(v){return v>0?'up':v<0?'down':'muted'}
+function hace(ms){if(!ms)return '—';var s=Math.round((Date.now()-ms)/1000);if(s<60)return 'hace '+s+' s';if(s<3600)return 'hace '+Math.round(s/60)+' min';if(s<86400)return 'hace '+Math.round(s/3600)+' h';return 'hace '+Math.round(s/86400)+' d'}
+function hora(ms){var d=new Date(ms);return d.toLocaleString('es',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}
+
+// ---------------------------------------------------------------- HTTP
+var httpN=0,httpPend={};
+window.kumoHttp=function(id,status,texto){var p=httpPend[id];if(!p)return;delete httpPend[id];var d;try{d=JSON.parse(texto||'{}')}catch(e){d={texto:texto}}p({status:status,data:d})};
+// Cloudflare y Groq no aceptan CORS: en la app pasa por Android; en navegador se intenta fetch.
+function httpExterno(metodo,url,cab,cuerpo){
+  if(NATIVO&&NATIVO.http){return new Promise(function(res){var id='h'+(++httpN);httpPend[id]=res;NATIVO.http(id,metodo,url,JSON.stringify(cab||{}),cuerpo?JSON.stringify(cuerpo):'')})}
+  return fetch(url,{method:metodo,headers:cab,body:cuerpo?JSON.stringify(cuerpo):undefined}).then(function(r){return r.json().catch(function(){return {}}).then(function(d){return {status:r.status,data:d}})});
+}
+function gh(metodo,ruta,cuerpo,token){
+  return fetch('https://api.github.com'+ruta,{method:metodo,headers:{Authorization:'Bearer '+(token||(S.gh&&S.gh.token)),Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'},body:cuerpo?JSON.stringify(cuerpo):undefined})
+    .then(function(r){return r.text().then(function(t){var d={};try{d=t?JSON.parse(t):{}}catch(e){}return {status:r.status,data:d,headers:r.headers}})});
+}
+function traduce(e){
+  var m=String(e&&e.message||e||'');
+  if(e&&e.status===401)return 'Token inválido: revisa la conexión en Config';
+  if(/Failed to fetch|NetworkError|Load failed/i.test(m))return 'Sin conexión con tu nube';
+  return m||'Error desconocido';
+}
+function api(ruta,cuerpo){
+  if(S.demo)return Promise.resolve(DEMO.api(ruta,cuerpo));
+  if(!S.url)return Promise.reject(new Error('Sin nube conectada'));
+  return fetch(S.url+ruta,{method:cuerpo?'POST':'GET',headers:{Authorization:'Bearer '+S.token,'Content-Type':'application/json'},body:cuerpo?JSON.stringify(cuerpo):undefined})
+    .then(function(r){return r.json().catch(function(){return {}}).then(function(d){if(!r.ok){var er=new Error(d.error||('HTTP '+r.status));er.status=r.status;er.data=d;throw er}return d})});
+}
+
+// ---------------------------------------------------------------- Navegación
+function irA(id){
+  document.querySelectorAll('.screen').forEach(function(s){s.classList.toggle('active',s.id===id)});
+  document.querySelectorAll('.nav button').forEach(function(b){b.classList.toggle('active',b.getAttribute('data-target')===id)});
+  window.scrollTo(0,0);
+  if(id==='radar')cargarRadar();if(id==='ia')cargarBitacora();if(id==='cartera')cargarOps();if(id==='estrategia')pintarEstrategia();if(id==='config')pintarConfig();
+}
+document.querySelectorAll('.nav button').forEach(function(b){b.onclick=function(){irA(b.getAttribute('data-target'))}});
+
+// ================================================================ BIENVENIDA
+var ORDEN=['hola','tema','inicio','gh','cf','groq','ex','resumen'];
+var pasoActual='hola',modoAsistente='nuevo';
+function irPaso(p){
+  pasoActual=p;
+  document.querySelectorAll('.paso').forEach(function(s){s.classList.toggle('activo',s.getAttribute('data-paso')===p)});
+  var i=ORDEN.indexOf(p);$('puntos').innerHTML=ORDEN.map(function(_,k){return '<i class="'+(k<=i?'on':'')+'"></i>'}).join('');
+  $('puntos').style.visibility=i<0?'hidden':'visible';
+  $('onbSaltar').style.visibility=(S.url||S.demo)?'visible':'hidden';
+  if(p==='resumen')pintarResumen();
+  if(p==='ex')pintarExchange();
+  $('onb').scrollTop=0;
+}
+function abrirOnb(p,modo){modoAsistente=modo||'nuevo';$('onb').classList.add('open');irPaso(p||'hola')}
+function cerrarOnb(){$('onb').classList.remove('open');S.onb=true;guardarS()}
+document.querySelectorAll('[data-ir]').forEach(function(b){b.onclick=function(){irPaso(b.getAttribute('data-ir'))}});
+document.querySelectorAll('#temas .opcion,#temaChips button').forEach(function(b){b.onclick=function(){aplicarTema(b.getAttribute('data-tema'))}});
+$('onbSaltar').onclick=function(){cerrarOnb();iniciarApp()};
+$('onbDemo').onclick=function(){S.demo=true;S.url='';guardarS();cerrarOnb();iniciarApp();toast('Modo demo: datos de ejemplo')};
+$('finEntrar').onclick=function(){cerrarOnb();iniciarApp()};
+
+// -- Conectar nube existente
+$('cProbar').onclick=function(){
+  var url=$('cUrl').value.trim().replace(/\/+$/,''),tok=$('cToken').value.trim(),v=$('cValida');
+  if(!/^https:\/\//.test(url)){v.className='valida bad';v.textContent='La dirección debe empezar por https://';return}
+  v.className='valida';v.textContent='Probando…';
+  fetch(url+'/api/estado',{headers:{Authorization:'Bearer '+tok}}).then(function(r){
+    if(r.status===401)throw new Error('Token incorrecto');if(!r.ok)throw new Error('HTTP '+r.status);return r.json();
+  }).then(function(){S.url=url;S.token=tok;S.demo=false;guardarS();v.className='valida ok';v.textContent='✔ Conectado';setTimeout(function(){cerrarOnb();iniciarApp()},500)})
+    .catch(function(e){v.className='valida bad';v.textContent='✖ '+traduce(e)});
+};
+
+// -- Paso GitHub
+var W={};// datos del asistente (solo en memoria hasta instalar)
+$('ghSig').onclick=function(){
+  var t=$('ghToken').value.trim(),v=$('ghValida');
+  if(!t&&S.gh&&S.gh.token)t=S.gh.token;
+  if(!t){v.className='valida bad';v.textContent='Pega tu token de GitHub';return}
+  v.className='valida';v.textContent='Validando…';
+  gh('GET','/user',null,t).then(function(r){
+    if(r.status===401)throw new Error('Token rechazado por GitHub');
+    if(r.status!==200)throw new Error('GitHub respondió '+r.status);
+    var scopes=(r.headers.get('x-oauth-scopes')||'');
+    if(scopes&&(!/\brepo\b/.test(scopes)||!/\bworkflow\b/.test(scopes)))throw new Error('Al token le faltan permisos: marca «repo» y «workflow»');
+    W.gh={token:t,login:r.data.login};v.className='valida ok';v.textContent='✔ Hola, '+r.data.login;
+    setTimeout(function(){irPaso(modoAsistente==='claves'?'groq':'cf')},450);
+  }).catch(function(e){v.className='valida bad';v.textContent='✖ '+traduce(e)});
+};
+
+// -- Paso Cloudflare
+$('cfSig').onclick=function(){
+  var t=$('cfToken').value.trim(),v=$('cfValida');
+  if(W.cf&&W.cf.token===t&&$('cfCuenta').value){W.cf.cuenta=$('cfCuenta').value;irPaso('groq');return}
+  if(!t){v.className='valida bad';v.textContent='Pega tu token de Cloudflare';return}
+  v.className='valida';v.textContent='Validando…';
+  var cab={Authorization:'Bearer '+t};
+  // Sirve para tokens de usuario y de cuenta: /user/tokens/verify rechaza los de cuenta.
+  httpExterno('GET','https://api.cloudflare.com/client/v4/accounts?per_page=50',cab).then(function(r){
+    if(!r.data||!r.data.success)throw new Error('Cloudflare rechazó el token');
+    var cuentas=r.data.result||[];
+    if(!cuentas.length)throw new Error('El token no tiene acceso a ninguna cuenta: elige tu cuenta en «Account Resources»');
+    W.cf={token:t,cuenta:cuentas[0].id};
+    $('cfCuenta').innerHTML=cuentas.map(function(c){return '<option value="'+esc(c.id)+'">'+esc(c.name)+'</option>'}).join('');
+    if(cuentas.length>1){$('cfCuentaL').classList.remove('oculto');v.className='valida ok';v.textContent='✔ Token válido: elige la cuenta y continúa';return}
+    v.className='valida ok';v.textContent='✔ Cuenta: '+cuentas[0].name;setTimeout(function(){irPaso('groq')},450);
+  }).catch(function(e){
+    v.className='valida bad';
+    v.textContent='✖ '+(/fetch|NetworkError/i.test(String(e.message))&&!NATIVO?'Valida este paso desde la app Android (el navegador no puede llamar a Cloudflare)':traduce(e));
+  });
+};
+
+// -- Paso Groq
+$('groqSig').onclick=function(){
+  var k=$('groqKey').value.trim(),v=$('groqValida');
+  if(!k&&modoAsistente==='claves'){delete W.groq;irPaso('ex');return}
+  if(!k){v.className='valida bad';v.textContent='Pega tu clave o toca «Seguir sin IA»';return}
+  v.className='valida';v.textContent='Validando…';
+  httpExterno('GET','https://api.groq.com/openai/v1/models',{Authorization:'Bearer '+k}).then(function(r){
+    if(r.status===401||r.status===403)throw new Error('Groq rechazó la clave');
+    if(r.status!==200)throw new Error('Groq respondió '+r.status);
+    W.groq=k;v.className='valida ok';v.textContent='✔ IA lista ('+((r.data.data||[]).length)+' modelos)';setTimeout(function(){irPaso('ex')},450);
+  }).catch(function(e){v.className='valida bad';v.textContent='✖ '+traduce(e)});
+};
+$('groqSaltar').onclick=function(){W.groq='';irPaso('ex')};
+
+// -- Paso Exchange
+var EXCHANGES=[
+  {id:'cryptocom_app',n:'Crypto.com App',q:['USDC'],nota:'La API de la App de Crypto.com. Crea la clave en la App, en la sección de claves API, sin permiso de retiros.'},
+  {id:'cryptocom',n:'Crypto.com Exchange',q:['USD','USDT'],nota:'Exchange de Crypto.com (exchange.crypto.com → Ajustes → API Keys). Activa solo «Trade».'},
+  {id:'kraken',n:'Kraken',q:['USD','USDT','EUR'],nota:'Kraken → Settings → API. Permisos: Query Funds, Query Orders, Create & Modify Orders.'},
+  {id:'coinbase',n:'Coinbase Advanced',q:['USDC','USD'],nota:'Coinbase Developer Platform → API key «Trade». API key = nombre de la clave; Secret = clave privada completa.'},
+  {id:'bitstamp',n:'Bitstamp',q:['USD','USDT','EUR'],nota:'Bitstamp → Settings → API Access. Activa solo balance y trading.'},
+  {id:'hyperliquid',n:'Hyperliquid (sin KYC · DEX)',q:['USDC'],k:'Dirección de tu cuenta (0x…)',s:'Clave privada de la API wallet',
+   nota:'Sin KYC: te conectas con una billetera, no con tus datos. En app.hyperliquid.xyz → More → API crea una «API wallet»: puede operar pero NO retirar. Pega aquí la dirección de tu cuenta principal y la clave privada de esa API wallet. Orden mínima: 10 USDC.'},
+  {id:'mexc',n:'MEXC (sin KYC)',q:['USDT'],nota:'MEXC permite abrir cuenta y operar sin verificar identidad (los retiros sin KYC tienen límite diario). MEXC → API Management: activa solo Spot trading, sin retiros.'},
+  {id:'gate',n:'Gate',q:['USDT'],nota:'Gate → API Management. Permiso Spot trade, sin retiros.'},
+  {id:'otro',n:'Otro (id de ccxt)',q:['USDT','USDC','USD','EUR'],nota:'Kumo usa ccxt: escribe el id del exchange tal como aparece en ccxt.'}
+];
+$('exId').innerHTML=EXCHANGES.map(function(x){return '<option value="'+x.id+'">'+esc(x.n)+'</option>'}).join('');
+function exSel(){var id=$('exId').value;for(var i=0;i<EXCHANGES.length;i++)if(EXCHANGES[i].id===id)return EXCHANGES[i];return EXCHANGES[0]}
+function pintarExchange(){
+  var x=exSel();$('exNota').textContent=x.nota;$('exNota').className='notice'+(x.bloq?' warn':'');
+  var q=$('exQuote').value;$('exQuote').innerHTML=x.q.map(function(c){return '<option'+(c===q?' selected':'')+'>'+c+'</option>'}).join('');
+  $('exOtroL').classList.toggle('oculto',x.id!=='otro');$('exPassL').classList.toggle('oculto',!x.pass&&x.id!=='otro');
+  $('exClaves').classList.toggle('oculto',$('exSinClaves').checked);
+  $('exKeyT').textContent=x.k||'API key';$('exSecretT').textContent=x.s||'Secret';
+}
+$('exId').onchange=pintarExchange;$('exSinClaves').onchange=pintarExchange;
+$('exSig').onclick=function(){
+  var x=exSel(),v=$('exValida'),id=x.id==='otro'?$('exOtro').value.trim().toLowerCase():x.id;
+  if(!/^[a-z0-9_]{2,30}$/.test(id)){v.className='valida bad';v.textContent='Escribe un id de ccxt válido';return}
+  var sin=$('exSinClaves').checked,k=$('exKey').value.trim(),s=$('exSecret').value.trim();
+  if(!sin&&(!k||!s)){v.className='valida bad';v.textContent=!k?'Falta la API key (o marca «Empezar sin claves»)':'Falta el secret: sin él el exchange rechaza todo (401). Si no lo guardaste, crea una clave nueva.';return}
+  if(x.id==='hyperliquid'&&(!/^0x[0-9a-fA-F]{40}$/.test(k)||!/^(0x)?[0-9a-fA-F]{64}$/.test(s))){v.className='valida bad';v.textContent='Hyperliquid: la dirección es 0x + 40 caracteres y la clave privada 64 caracteres hexadecimales';return}
+  if(k===s){v.className='valida bad';v.textContent='La API key y el secret son iguales: revisa que pegaste el secret';return}
+  W.ex={id:id,nombre:x.n,quote:$('exQuote').value,key:sin?'':k,secret:sin?'':s,pass:sin?'':$('exPass').value.trim()};
+  v.textContent='';irPaso('resumen');
+};
+
+// -- Resumen e instalación
+function pintarResumen(){
+  if(!$('plantilla').value)$('plantilla').value=PLANTILLA;
+  if(!$('repoNombre').value)$('repoNombre').value=(S.gh&&S.gh.repo)||'kumo-nube';
+  var fila=function(a,b,ok){return '<div class="row"><span class="info"><b>'+a+'</b><small>'+b+'</small></span><span class="badge '+(ok?'buy':'wait')+'">'+(ok?'OK':'—')+'</span></div>'};
+  var cambio=modoAsistente==='claves';
+  $('resumen').innerHTML=
+    fila('GitHub',W.gh?('@'+esc(W.gh.login)+' · repositorio privado'):'falta',!!W.gh)+
+    (cambio?'':fila('Cloudflare',W.cf?'cuenta '+esc(W.cf.cuenta.slice(0,8))+'…':'falta',!!W.cf))+
+    fila('IA Groq',W.groq?'activada':(W.groq===''?'sin IA':'sin cambios'),!!W.groq)+
+    fila('Exchange',W.ex?esc(W.ex.nombre)+' · '+esc(W.ex.quote)+(W.ex.key?' · con claves':' · solo simulación'):'falta',!!W.ex)+
+    '<p class="notice">'+(cambio?'Actualizo los secretos de tu repositorio y reinstalo la nube con ellos.':'Voy a crear tu repositorio privado, guardar las claves cifradas, desplegar tu nube en Cloudflare y lanzar el primer ciclo en <b>simulación</b>.')+'</p>';
+  $('instalar').textContent=cambio?'🔐 GUARDAR CLAVES':'☁️ CREAR MI NUBE';
+}
+function logI(t,cls){var d=document.createElement('div');d.textContent=t;if(cls)d.className=cls;$('instLog').appendChild(d);$('instLog').scrollIntoView({block:'end'});return d}
+function espera(ms){return new Promise(function(r){setTimeout(r,ms)})}
+function aleatorio(){var a=new Uint8Array(24);crypto.getRandomValues(a);return Array.prototype.map.call(a,function(b){return ('0'+b.toString(16)).slice(-2)}).join('')}
+function okGh(r,que){if(r.status>=200&&r.status<300)return r;var m=(r.data&&r.data.message)||('HTTP '+r.status);throw new Error(que+': '+m)}
+
+function ponerSecretos(owner,repo,secretos){
+  return gh('GET','/repos/'+owner+'/'+repo+'/actions/secrets/public-key').then(function(r){
+    okGh(r,'Clave pública de GitHub');var clave=r.data;
+    var nombres=Object.keys(secretos),i=0;
+    function sig(){
+      if(i>=nombres.length)return Promise.resolve();
+      var n=nombres[i++],v=secretos[n];
+      var p=v===null?gh('DELETE','/repos/'+owner+'/'+repo+'/actions/secrets/'+n).then(function(r){if(r.status!==404)okGh(r,'Borrar '+n)})
+        :gh('PUT','/repos/'+owner+'/'+repo+'/actions/secrets/'+n,{encrypted_value:window.kumoSellar(clave.key,String(v)),key_id:clave.key_id}).then(function(r){okGh(r,'Guardar '+n)});
+      return p.then(sig);
+    }
+    return sig();
+  });
+}
+function lanzarWorkflow(owner,repo,wf,rama){
+  var intentos=0;
+  function intenta(){
+    return gh('POST','/repos/'+owner+'/'+repo+'/actions/workflows/'+wf+'/dispatches',{ref:rama}).then(function(r){
+      if(r.status===204)return;
+      if((r.status===404||r.status===422)&&intentos++<12)return espera(5000).then(intenta);
+      okGh(r,'Lanzar '+wf);
+    });
+  }
+  return intenta();
+}
+function esperarRun(owner,repo,wf,desde,linea){
+  var t0=Date.now();
+  function mira(){
+    return gh('GET','/repos/'+owner+'/'+repo+'/actions/workflows/'+wf+'/runs?per_page=3').then(function(r){
+      okGh(r,'Estado de la instalación');
+      var run=(r.data.workflow_runs||[]).filter(function(x){return Date.parse(x.created_at)>=desde-60000})[0];
+      var seg=Math.round((Date.now()-t0)/1000);
+      if(run){
+        linea.textContent='Instalando en Cloudflare… '+({queued:'en cola',in_progress:'en curso',completed:'terminado'}[run.status]||run.status)+' ('+seg+' s)';
+        if(run.status==='completed'){if(run.conclusion==='success')return run;var e=new Error('La instalación falló en GitHub Actions. Revisa el detalle en: '+run.html_url);e.url=run.html_url;throw e}
+      }else linea.textContent='Esperando a GitHub Actions… ('+seg+' s)';
+      if(Date.now()-t0>12*60000)throw new Error('La instalación tarda demasiado. Revisa la pestaña Actions de tu repositorio.');
+      return espera(6000).then(mira);
+    });
+  }
+  return mira();
+}
+
+var instalando=false;
+$('instalar').onclick=function(){
+  if(instalando)return;
+  if(!W.gh){toast('Falta validar GitHub',true);irPaso('gh');return}
+  if(modoAsistente!=='claves'&&!W.cf){toast('Falta validar Cloudflare',true);irPaso('cf');return}
+  if(!W.ex){toast('Falta elegir el exchange',true);irPaso('ex');return}
+  instalando=true;$('instalar').disabled=true;$('resAtras').disabled=true;
+  var log=$('instLog');log.innerHTML='';log.classList.remove('oculto');
+  var owner=W.gh.login,repo=$('repoNombre').value.trim()||'kumo-nube',plantilla=$('plantilla').value.trim()||PLANTILLA,rama='main';
+  var appToken=S.token&&S.gh&&S.gh.owner===owner&&S.gh.repo===repo?S.token:aleatorio();
+  var t0;
+  logI('¡Iniciando secuencia de despegue!');
+  var l1=logI('Preparando tu repositorio privado…');
+  gh('GET','/repos/'+owner+'/'+repo,null,W.gh.token).then(function(r){
+    if(r.status===200){l1.textContent='Repositorio '+owner+'/'+repo+' ya existe: lo reutilizo';l1.className='ok';rama=r.data.default_branch||'main';return}
+    if(modoAsistente==='claves')throw new Error('No encuentro '+owner+'/'+repo);
+    return gh('POST','/repos/'+plantilla+'/generate',{owner:owner,name:repo,private:true,description:'Mi nube de Kumo Bot ☁️'},W.gh.token).then(function(r){
+      okGh(r,'Crear repositorio desde '+plantilla);rama=r.data.default_branch||'main';
+      l1.textContent='Repositorio privado '+owner+'/'+repo+' creado';l1.className='ok';
+      var l=logI('Esperando a que GitHub copie los archivos…'),n=0;
+      // Con el token recién validado: S.gh aún no existe y sin token el repo privado da 404.
+      function listo(){return gh('GET','/repos/'+owner+'/'+repo+'/contents/.github/workflows/instalar.yml?ref='+rama,null,W.gh.token).then(function(r){
+        if(r.status===200){l.className='ok';l.textContent='Archivos listos';return}
+        if(r.status===401||r.status===403)okGh(r,'Leer el repositorio nuevo');
+        if(n++>40)throw new Error('GitHub no terminó de copiar la plantilla en 2 min. Toca Reintentar.');
+        l.textContent='Esperando a que GitHub copie los archivos… ('+n*3+' s)';return espera(3000).then(listo)})}
+      return listo();
+    });
+  }).then(function(){
+    S.gh={token:W.gh.token,owner:owner,repo:repo,rama:rama};guardarS();
+    var l=logI('Cifrando y guardando tus claves en GitHub…');
+    var sec={EXCHANGE_ID:W.ex.id,EXCHANGE_API_KEY:W.ex.key||null,EXCHANGE_SECRET:W.ex.secret||null,EXCHANGE_PASSWORD:W.ex.pass||null,KUMO_APP_TOKEN:appToken,KUMO_RUNNER_TOKEN:aleatorio()};
+    if(W.groq!==undefined)sec.GROQ_API_KEY=W.groq||null;
+    if(W.cf){sec.CLOUDFLARE_API_TOKEN=W.cf.token;sec.CLOUDFLARE_ACCOUNT_ID=W.cf.cuenta}
+    return ponerSecretos(owner,repo,sec).then(function(){l.className='ok';l.textContent='Claves guardadas cifradas ('+Object.keys(sec).length+' secretos)'});
+  }).then(function(){
+    var l=logI('Lanzando la instalación en Cloudflare…');t0=Date.now();
+    return lanzarWorkflow(owner,repo,'instalar.yml',rama).then(function(){return esperarRun(owner,repo,'instalar.yml',t0,l)}).then(function(){l.className='ok';l.textContent='Nube desplegada en Cloudflare'});
+  }).then(function(){
+    var l=logI('Leyendo la dirección de tu nube…');
+    return gh('GET','/repos/'+owner+'/'+repo+'/contents/kumo.json?ref='+rama).then(function(r){
+      okGh(r,'kumo.json');var info=JSON.parse(decodeURIComponent(escape(atob(String(r.data.content).replace(/\s/g,'')))));
+      l.className='ok';l.textContent='Tu nube: '+info.url;return info.url;
+    });
+  }).then(function(url){
+    var l=logI('Probando la conexión…');
+    return fetch(url+'/api/estado',{headers:{Authorization:'Bearer '+appToken}}).then(function(r){if(!r.ok)throw new Error('La nube respondió HTTP '+r.status);l.className='ok';l.textContent='Conexión segura OK';
+      S.url=url;S.token=appToken;S.demo=false;S.exchange=W.ex.nombre;guardarS();if(NATIVO&&NATIVO.config)NATIVO.config(url,appToken);});
+  }).then(function(){
+    var l=logI('Configurando la moneda base y lanzando el primer ciclo…');
+    return api('/api/config',W.ex.id==='hyperliquid'?{quote:W.ex.quote,monto_min:11,monto_max:30}:{quote:W.ex.quote}).then(function(){return lanzarWorkflow(owner,repo,'ciclo.yml',rama)}).then(function(){l.className='ok';l.textContent='Primer ciclo en marcha (tarda 1-2 min)'});
+  }).then(function(){
+    logI('¡Despegue completado!','ok');W={};
+    ['ghToken','cfToken','groqKey','exKey','exSecret','exPass'].forEach(function(i){$(i).value=''});
+    setTimeout(function(){irPaso('fin')},700);
+  }).catch(function(e){
+    logI(traduce(e),'err');
+    if(e.url){var d=logI('Abrir detalle en GitHub');d.style.textDecoration='underline';d.onclick=function(){abrirUrl(e.url)}}
+    $('instalar').textContent='↻ REINTENTAR';
+  }).then(function(){instalando=false;$('instalar').disabled=false;$('resAtras').disabled=false});
+};
+
+
+// ================================================================ TUTORIAL
+var TUTO=[
+ '<span class="tuto-num">1</span><span class="eyebrow"><span class="kata">ようこそ</span>BIENVENIDA</span><h2>¿Qué es Kumo?</h2>'+
+ '<p>Kumo es un bot de trading cripto <b>abierto y gratis</b>. Esta app viene <b>vacía</b>: no tiene cuentas ni claves de nadie.</p>'+
+ '<div class="globo">Funciono cuando tú conectas <b>tus propias</b> cuentas. Vivo en <b>tu</b> nube y solo tú ves tus claves y tu dinero.</div>'+
+ '<p class="ayuda">Mientras tanto puedes explorar el <b>modo demo</b> con datos de ejemplo.</p>',
+ '<span class="tuto-num">2</span><span class="eyebrow"><span class="kata">準備</span>ANTES DE EMPEZAR</span><h2>Lo que necesitas</h2>'+
+ '<p>Todo es gratis. Ten a mano tu correo y unos <b>15 minutos</b>:</p><div class="req">'+
+ '<div><span>🐙</span><p style="margin:0"><b>Cuenta de GitHub</b><small>Ejecuta el bot cada 30 min y guarda tus claves cifradas.</small></p></div>'+
+ '<div><span>☁️</span><p style="margin:0"><b>Cuenta de Cloudflare</b><small>Aloja tu nube: la app se conecta a ella.</small></p></div>'+
+ '<div><span>🧠</span><p style="margin:0"><b>Cuenta de Groq</b> (opcional)<small>La IA que revisa las operaciones y analiza monedas.</small></p></div>'+
+ '<div><span>💱</span><p style="margin:0"><b>Cuenta en un exchange</b><small>Crypto.com, Kraken, Coinbase… Puedes empezar sin claves, solo en simulación.</small></p></div></div>',
+ '<span class="tuto-num">3</span><span class="eyebrow"><span class="kata">鍵</span>LAS CLAVES</span><h2>Cómo sacar cada clave</h2>'+
+ '<p>El asistente te da un botón para cada una. El truco: <b>abre el enlace → crea la clave → cópiala → vuelve a Kumo → pégala</b>.</p><ol>'+
+ '<li><b>GitHub</b>: token clásico con permisos <code>repo</code> y <code>workflow</code> (el enlace ya los marca).</li>'+
+ '<li><b>Cloudflare</b>: My Profile → API Tokens → Create Token → plantilla <b>«Edit Cloudflare Workers»</b>.</li>'+
+ '<li><b>Groq</b>: console.groq.com → API Keys → Create API Key.</li>'+
+ '<li><b>Exchange</b>: crea una API key con <b>lectura y trading. NUNCA con retiros.</b></li></ol>'+
+ '<p class="notice warn">Cada clave se muestra una sola vez: cópiala antes de cerrar la página.</p>',
+ '<span class="tuto-num">4</span><span class="eyebrow"><span class="kata">発進</span>INSTALACIÓN</span><h2>Qué hago con tus claves</h2><ol>'+
+ '<li>Creo un repositorio <b>privado</b> en tu GitHub a partir de la plantilla abierta.</li>'+
+ '<li>Guardo tus claves como <b>secretos cifrados</b> de ese repositorio: no quedan en el teléfono.</li>'+
+ '<li>Instalo tu nube en tu Cloudflare (2-4 min).</li>'+
+ '<li>Lanzo el primer ciclo. Después opero solo <b>cada 30 minutos</b>.</li></ol>'+
+ '<p class="ayuda">Si algo falla, te muestro el error y puedes tocar <b>Reintentar</b>: retomo donde quedé.</p>',
+ '<span class="tuto-num">5</span><span class="eyebrow"><span class="kata">安全</span>TU DINERO</span><h2>Seguridad primero</h2><ul>'+
+ '<li>Empiezo <b>siempre en simulación</b>: cartera virtual con precios reales.</li>'+
+ '<li>El dinero real lo activas tú en Config, con doble confirmación.</li>'+
+ '<li>Por defecto <b>nunca vendo con pérdida</b> y cada operación tiene un monto máximo.</li>'+
+ '<li>Puedes <b>pausarme</b> cuando quieras desde el Panel.</li></ul>'+
+ '<p class="notice bad">El trading tiene riesgo y Kumo no es asesoría financiera. Usa solo dinero que puedas perder.</p>',
+ '<span class="tuto-num">6</span><span class="eyebrow"><span class="kata">毎日</span>DÍA A DÍA</span><h2>Cómo usar la app</h2><ul>'+
+ '<li><b>⌂ Panel</b>: valor, último ciclo, pausar o lanzar un ciclo ya.</li>'+
+ '<li><b>⌖ Radar</b>: monedas con más volumen, análisis con IA e «Incluir».</li>'+
+ '<li><b>◎ IA</b>: qué opinó la IA y la bitácora de avisos.</li>'+
+ '<li><b>◈ Cartera</b> y <b>◇ Estrategia</b>: tus activos, tu reparto y tus reglas.</li>'+
+ '<li><b>⚙ Config</b>: tema, dinero real, notificaciones y cambiar claves.</li></ul>'+
+ '<label class="check" style="margin-top:12px;font-weight:700"><input type="checkbox" id="tutoOk"> Entendí: Kumo usa solo mis cuentas y empieza en simulación.</label>'
+];
+var tutoI=0,tutoDespues=null;
+function pintarTuto(){
+  $('tutoCuerpo').innerHTML=TUTO[tutoI];$('tutoCuerpo').scrollTop=0;
+  $('tutoN').textContent=tutoI+1;$('tutoT').textContent=TUTO.length;
+  $('tutoPuntos').innerHTML=TUTO.map(function(_,k){return '<i class="'+(k<=tutoI?'on':'')+'"></i>'}).join('');
+  $('tutoAtras').disabled=tutoI===0;
+  var ult=tutoI===TUTO.length-1;$('tutoSig').textContent=ult?'¡EMPEZAR!':'▶';
+  if(ult){$('tutoSig').disabled=!S.tuto;$('tutoOk').checked=!!S.tuto;$('tutoOk').onchange=function(){$('tutoSig').disabled=!this.checked}}else $('tutoSig').disabled=false;
+}
+function abrirTuto(i,despues){tutoI=i||0;tutoDespues=despues||null;$('tuto').classList.add('open');pintarTuto()}
+function cerrarTuto(){$('tuto').classList.remove('open');var f=tutoDespues;tutoDespues=null;if(f)f()}
+$('tutoAtras').onclick=function(){if(tutoI>0){tutoI--;pintarTuto()}};
+$('tutoSig').onclick=function(){if(tutoI<TUTO.length-1){tutoI++;pintarTuto();return}S.tuto=true;guardarS();cerrarTuto()};
+$('tutoCerrar').onclick=cerrarTuto;
+document.addEventListener('click',function(e){var b=e.target.closest('[data-tuto]');if(b){e.preventDefault();abrirTuto(Number(b.getAttribute('data-tuto')))}});
+// «Crear mi nube» exige haber visto el tutorial al menos una vez.
+document.querySelector('[data-paso="inicio"] [data-ir="gh"]').onclick=function(){if(S.tuto)irPaso('gh');else abrirTuto(0,function(){if(S.tuto)irPaso('gh')})};
+
+// ================================================================ APP
+function pintarEstado(){
+  var e=datos.estado||{},u=e.ultimo||{},c=e.config||{};
+  $('topEx').textContent=(u.exchange||S.exchange||'tu nube').toUpperCase().replace('_',' ')+(u.quote?' · '+u.quote:'');
+  var real=c.modo==='real';
+  $('modoPill').textContent=real?'DINERO REAL':'SIMULACIÓN';$('modoPill').className='pill '+(real?'bad':'acento');
+  $('total').textContent=u.total!=null?num(u.total,2)+' '+(u.quote||''):'—';
+  var h=e.historial||[];
+  if(h.length>1){var d=h[h.length-1][1]-h[0][1],p=h[0][1]?d/h[0][1]*100:0;$('delta').innerHTML='<span class="'+clsPct(d)+'">'+(d>=0?'+':'')+num(d,2)+' ('+pct(p)+')</span> desde '+hora(h[0][0])}else $('delta').textContent='Aún sin historial';
+  dibujar(h);
+  $('actualizado').textContent=e.actualizado?'Actualizado '+hace(e.actualizado):'Esperando el primer ciclo de tu nube…';
+  var ests=c.pausado?['EN PAUSA','warn']:(u.ok===false?['CON ERROR','bad']:(e.actualizado&&Date.now()-e.actualizado<75*60000?['ACTIVO','']:['SIN CICLOS','warn']));
+  $('estadoPill').innerHTML='<i></i>'+ests[0];$('estadoPill').className='pill live '+ests[1];
+  $('ultCiclo').textContent=e.ciclo?('#'+e.ciclo+' · '+hace(e.actualizado)):'—';
+  $('proxCiclo').textContent=proximo();
+  $('libre').textContent=u.libre!=null?num(u.libre,2)+' '+(u.quote||''):'—';
+  $('iaModelo').textContent=c.ia==='off'?'Apagada':((u.ia&&u.ia.modelo)||'—');
+  $('pausaBtn').textContent=c.pausado?'REANUDAR':'PAUSAR';$('pausaBtn').className=c.pausado?'primary':'danger';
+  var errs=u.errores||[];$('erroresAviso').classList.toggle('oculto',!errs.length);$('erroresAviso').innerHTML='<b>⚠ Atención</b><br>'+errs.map(esc).join('<br>');
+  var filas=[];
+  (u.ejecutadas||[]).forEach(function(o){filas.push(filaOp(o,true))});
+  (u.propuestas||[]).filter(function(p){return !(u.ejecutadas||[]).some(function(o){return o.simbolo===p.simbolo&&o.accion===p.accion})}).forEach(function(p){
+    var bloq=(u.bloqueadas||[]).some(function(b){return b.simbolo===p.simbolo});
+    filas.push('<div class="row"><span class="info"><b>'+esc(p.simbolo)+'</b> <span class="badge '+(p.accion==='COMPRAR'?'buy':'sell')+'">'+p.accion+'</span> '+(bloq?'<span class="badge off">IA LA FRENÓ</span>':c.pausado?'<span class="badge off">EN PAUSA</span>':'')+'<small>'+esc(p.motivo)+'</small></span><span class="muted">'+(p.monto?num(p.monto,2):'')+'</span></div>');
+  });
+  $('decisiones').innerHTML=filas.join('')||'<p class="empty">'+(e.ciclo?'Sin operaciones en el último ciclo: el mercado no cumple tus reglas.':'Esperando el primer ciclo…')+'</p>';
+  // IA
+  $('iaModo').textContent={off:'IA APAGADA',veto:'IA CON VETO',confirmar:'IA CONFIRMA'}[c.ia]||'—';
+  var op=(u.ia&&u.ia.opiniones)||{},ks=Object.keys(op);
+  $('opiniones').innerHTML=ks.length?ks.map(function(k){var o=op[k];return '<div class="row"><span class="info"><b>'+esc(k)+'</b> <span class="badge '+(o.accion==='COMPRAR'?'buy':o.accion==='VENDER'?'sell':'wait')+'">'+esc(o.accion)+' '+o.confianza+'%</span><small>'+esc(o.razon)+'</small></span></div>'}).join(''):'<p class="empty">La IA solo opina cuando la estrategia propone una operación.</p>';
+  $('notas').innerHTML=(u.notas||[]).map(function(n){return '<div class="row"><span class="info"><small style="color:var(--text)">'+esc(n)+'</small></span></div>'}).join('')||'<p class="empty">—</p>';
+  // Cartera
+  var costos=e.costos||{};
+  $('activos').innerHTML=(u.activos||[]).map(function(a){
+    var obj=a.objetivo||0;
+    return '<div class="row"><span class="info"><b>'+esc(a.simbolo)+'</b> <small>'+num(a.cantidad,6)+' · '+precio(a.precio)+(a.costo?' · costo '+precio(a.costo):'')+(costos[a.simbolo]&&costos[a.simbolo].estimado?' (estimado)':'')+'</small><div class="bar"><i style="width:'+Math.min(100,a.peso)+'%"></i>'+(obj?'<em style="left:'+Math.min(99,obj)+'%"></em>':'')+'</div></span><span style="text-align:right"><b>'+num(a.valor,2)+'</b><small class="'+clsPct(a.pnl)+'">'+(a.pnl!=null?pct(a.pnl):num(a.peso,1)+'%')+'</small></span></div>';
+  }).join('')||'<p class="empty">Sin activos todavía.</p>';
+}
+function filaOp(o){
+  return '<div class="row"><span class="info"><b>'+esc(o.simbolo)+'</b> <span class="badge '+(o.accion==='COMPRAR'?'buy':'sell')+'">'+(o.accion==='COMPRAR'?'COMPRA':'VENTA')+'</span>'+(o.simulada?' <span class="badge off">SIM</span>':'')+'<small>'+esc(o.motivo||'')+(o.ts?' · '+hora(o.ts*1000):'')+'</small></span><span style="text-align:right"><b>'+num(o.total,2)+'</b><small>@ '+precio(o.precio)+(o.pnl!=null?' · <span class="'+clsPct(o.pnl)+'">'+pct(o.pnl)+'</span>':'')+'</small></span></div>';
+}
+function proximo(){
+  var c=(datos.estado||{}).config||{};if(c.pausado)return 'En pausa';
+  var d=new Date(),m=d.getUTCMinutes(),obj=m<7?7:m<37?37:67,falta=obj-m;return '~'+falta+' min';
+}
+function dibujar(h){
+  if(!h||h.length<2){$('chLinea').setAttribute('d','');$('chArea').setAttribute('d','');return}
+  var vs=h.map(function(x){return x[1]}),mn=Math.min.apply(null,vs),mx=Math.max.apply(null,vs),r=(mx-mn)||1;
+  var pts=vs.map(function(v,i){return [i/(vs.length-1)*600,130-(v-mn)/r*115]});
+  var d='M'+pts.map(function(p){return p[0].toFixed(1)+','+p[1].toFixed(1)}).join('L');
+  $('chLinea').setAttribute('d',d);$('chArea').setAttribute('d',d+'L600,140L0,140Z');
+}
+function conn(ok,txt){$('conn').className='pill '+(ok?'live':'bad');$('conn').innerHTML='<i></i><span>'+txt+'</span>'}
+function cargarEstado(){
+  return api('/api/estado').then(function(d){datos.estado=d;datos.config=d.config;conn(true,S.demo?'DEMO':'EN LÍNEA');pintarEstado()})
+    .catch(function(e){conn(false,e.status===401?'TOKEN':'SIN RED');if(e.status===401)toast('Token inválido: reconecta en Config',true)});
+}
+function cargarOps(){
+  api('/api/operaciones').then(function(d){datos.ops=d.operaciones||[];$('opsCuenta').textContent=datos.ops.length;$('operaciones').innerHTML=datos.ops.slice(0,60).map(filaOp).join('')||'<p class="empty">Aún no hay operaciones.</p>'}).catch(function(e){$('operaciones').innerHTML='<p class="empty">'+esc(traduce(e))+'</p>'});
+}
+function cargarBitacora(){
+  api('/api/feed?since=0').then(function(d){$('bitacora').innerHTML=(d.items||[]).map(function(i){return '<div class="row"><span class="info"><b>'+esc(i.title)+'</b><small>'+esc(i.body)+' · '+hace(i.ts)+'</small></span></div>'}).join('')||'<p class="empty">Sin avisos todavía.</p>'}).catch(function(e){$('bitacora').innerHTML='<p class="empty">'+esc(traduce(e))+'</p>'});
+}
+$('bitRefresh').onclick=cargarBitacora;
+
+$('pausaBtn').onclick=function(){
+  var p=datos.config&&datos.config.pausado;
+  confirmar(p?'Reanudar el bot':'Pausar el bot',p?'El bot volverá a operar en el próximo ciclo.':'El bot seguirá analizando pero no ejecutará operaciones.',p?'REANUDAR':'PAUSAR').then(function(ok){
+    if(!ok)return;api('/api/control',{accion:p?'reanudar':'pausar'}).then(function(){toast(p?'Bot reanudado':'Bot en pausa');cargarEstado()}).catch(function(e){toast(traduce(e),true)});
+  });
+};
+$('cicloAhora').onclick=function(){
+  if(S.demo){toast('En demo no hay nube real');return}
+  if(!S.gh||!S.gh.token){toast('Necesitas el token de GitHub: Config → Cambiar claves',true);return}
+  var b=$('cicloAhora');b.disabled=true;
+  lanzarWorkflow(S.gh.owner,S.gh.repo,'ciclo.yml',S.gh.rama||'main').then(function(){toast('Ciclo lanzado: resultados en 1-2 min');setTimeout(cargarEstado,90000)}).catch(function(e){toast(traduce(e),true)}).then(function(){setTimeout(function(){b.disabled=false},20000)});
+};
+
+// ---------------------------------------------------------------- Radar
+var radarF='todas';
+function cargarRadar(){
+  api('/api/radar').then(function(d){datos.radar=d;$('radarTs').textContent=d.actualizado?hace(d.actualizado):'SIN DATOS';$('radarTs').className='pill'+(d.actualizado?'':' warn');pintarRadar()}).catch(function(e){$('radarLista').innerHTML='<p class="empty">'+esc(traduce(e))+'</p>'});
+}
+function filaRadar(f){
+  var r=f.rsi,cl=r==null?'off':r<=35?'buy':r>=70?'sell':'wait';
+  return '<div class="card" data-sym="'+esc(f.simbolo)+'"><div class="card-head"><span><b>'+esc(f.simbolo)+'</b> '+(f.en_cartera?'<span class="badge buy">EN CARTERA</span>':'')+'</span><span style="text-align:right"><b>'+precio(f.precio)+'</b><small class="'+clsPct(f.cambio_24h)+'" style="display:block">'+pct(f.cambio_24h)+' 24h</small></span></div>'+
+    '<div class="kv"><div>RSI diario<b><span class="badge '+cl+'">'+(r==null?'—':r)+'</span></b></div><div>Tendencia<b>'+esc(f.tendencia||'—')+'</b></div><div>Volumen 24h<b>'+(f.volumen?num(f.volumen/1e6,1)+' M':'—')+'</b></div></div>'+
+    '<div class="grid two" style="margin-top:9px"><button class="small primary" data-analizar="'+esc(f.simbolo)+'">ANALIZAR CON IA</button><button class="small" data-incluir="'+esc(f.simbolo)+'">INCLUIR</button></div></div>';
+}
+function pintarRadar(){
+  var l=(datos.radar&&datos.radar.radar)||[];
+  l=l.filter(function(f){return radarF==='todas'||(radarF==='baratas'&&f.rsi!=null&&f.rsi<=40)||(radarF==='alza'&&f.tendencia==='alcista')||(radarF==='mias'&&f.en_cartera)});
+  $('radarLista').innerHTML=l.map(filaRadar).join('')||'<p class="empty">'+(datos.radar&&datos.radar.actualizado?'Nada con este filtro.':'El Radar se llena en el próximo ciclo de tu nube.')+'</p>';
+}
+$('radarFiltro').onclick=function(e){var b=e.target.closest('button');if(!b)return;radarF=b.getAttribute('data-f');this.querySelectorAll('button').forEach(function(x){x.classList.toggle('active',x===b)});pintarRadar()};
+$('radarForm').onsubmit=function(e){
+  e.preventDefault();var q=$('radarQ').value.trim().toUpperCase().replace(/[^A-Z0-9]/g,'');if(!q)return;
+  var f=((datos.radar&&datos.radar.radar)||[]).filter(function(x){return x.simbolo===q})[0];
+  if(f){$('radarAnalisis').innerHTML=filaRadar(f);return}
+  $('radarAnalisis').innerHTML='<div class="notice warn">'+esc(q)+' no está entre las monedas de tu Radar.</div><button class="small primary" style="margin-top:8px;width:100%" data-pedir="'+esc(q)+'">PEDIR DATOS DE '+esc(q)+' EN EL PRÓXIMO CICLO</button>';
+};
+document.addEventListener('click',function(e){
+  var b=e.target.closest('[data-analizar],[data-incluir],[data-pedir]');if(!b)return;
+  if(b.hasAttribute('data-pedir')){var s=b.getAttribute('data-pedir');api('/api/radar/pedir',{simbolo:s}).then(function(){toast(s+' se analizará en el próximo ciclo');$('radarAnalisis').innerHTML='<div class="notice">Pedido. Vuelve en unos minutos (o toca «Ciclo ahora» en el Panel).</div>'}).catch(function(er){toast(traduce(er),true)});return}
+  if(b.hasAttribute('data-analizar'))return analizar(b.getAttribute('data-analizar'),b);
+  incluir(b.getAttribute('data-incluir'));
+});
+var analisis={};
+function analizar(sym,boton){
+  if(boton){boton.disabled=true;boton.textContent='ANALIZANDO…'}
+  return api('/api/radar/analizar',{simbolo:sym}).then(function(d){
+    analisis[sym]=d;
+    var cls=d.veredicto==='INCORPORAR'?'si':d.veredicto==='NO INCORPORAR'?'no':'esp';
+    var html='<div class="verd '+cls+'"><b>'+esc(d.veredicto)+' · '+d.confianza+'%</b><small>'+esc(d.resena)+'</small></div>'+
+      (d.riesgos&&d.riesgos.length?'<div class="ayuda"><b>Riesgos</b><ul style="margin:4px 0 0;padding-left:18px">'+d.riesgos.map(function(r){return '<li>'+esc(r)+'</li>'}).join('')+'</ul></div>':'')+
+      '<small>'+(d.entrada?'Entrada sugerida: '+precio(d.entrada)+' · ':'')+'Sugiere '+d.pct_sugerido+'% del reparto · '+esc(d.modelo||'')+'</small>';
+    var card=boton&&boton.closest('.card');var cont=document.createElement('div');cont.innerHTML=html;
+    if(card){var prev=card.querySelector('.analisis');if(prev)prev.remove();cont.className='analisis';card.appendChild(cont)}
+    return d;
+  }).catch(function(e){toast(traduce(e),true)}).then(function(d){if(boton){boton.disabled=false;boton.textContent='ANALIZAR CON IA'}return d});
+}
+function incluir(sym){
+  var a=analisis[sym];
+  var pre=a?Promise.resolve(a):analizar(sym,null);
+  pre.then(function(a){
+    var sug=a?a.pct_sugerido:3,c=datos.config||{},ya=(c.objetivo||{})[sym];
+    var opts=[1,2,3,4,5,8,10,15].map(function(p){return '<option'+(p===sug?' selected':'')+'>'+p+'</option>'}).join('');
+    var aviso=a&&a.veredicto!=='INCORPORAR'?'⚠ La IA dice «'+a.veredicto+'». Puedes incluirla igual, bajo tu responsabilidad.\n\n':'';
+    confirmar('Incluir '+sym,aviso+'Kumo comprará '+sym+' poco a poco, cuando esté barata (RSI bajo), hasta llegar al % que elijas.'+(ya?'\nYa tiene '+ya+'%: se reemplaza.':''),'INCLUIR','<label class="form" style="margin-top:10px">% de tu cartera<select id="incPct">'+opts+'</select></label>').then(function(ok){
+      if(!ok)return;var p=Number(document.getElementById('incPct').value);
+      api('/api/radar/incluir',{simbolo:sym,pct:p}).then(function(d){datos.config=d.config;if(datos.estado)datos.estado.config=d.config;toast(sym+' incluida con '+p+'%')}).catch(function(e){toast(traduce(e),true)});
+    });
+  });
+}
+
+// ---------------------------------------------------------------- Estrategia
+var PARAMS=[
+  ['monto_min','Monto mínimo por operación','en tu moneda base'],['monto_max','Monto máximo por operación','tope por compra o venta'],
+  ['rsi_compra','RSI para comprar','compra si el RSI está por debajo'],['rsi_venta','RSI para vender','vende si el RSI está por encima'],
+  ['banda','Tolerancia del reparto (puntos %)','no rebalancea dentro de esta banda'],['ganancia_min','Ganancia mínima para vender (%)','sobre tu costo promedio'],
+  ['stop_perdida','Stop de pérdida (%)','0 = apagado; solo actúa si permites vender con pérdida'],['max_ops_ciclo','Máx. operaciones por ciclo',''],
+  ['ia_conf_min','Confianza mínima de la IA (%)','para vetar o confirmar'],['saldo_simulado','Saldo inicial de la simulación','al reiniciar la simulación']
+];
+var PERFILES={
+  prudente:{monto_max:10,rsi_compra:30,rsi_venta:72,ganancia_min:3,stop_perdida:0,nunca_vender_con_perdida:true,ia:'confirmar',ia_conf_min:70,max_ops_ciclo:1},
+  equilibrado:{monto_max:25,rsi_compra:35,rsi_venta:68,ganancia_min:1.5,stop_perdida:0,nunca_vender_con_perdida:true,ia:'veto',ia_conf_min:65,max_ops_ciclo:2},
+  activo:{monto_max:50,rsi_compra:42,rsi_venta:62,ganancia_min:1,stop_perdida:8,nunca_vender_con_perdida:false,ia:'veto',ia_conf_min:75,max_ops_ciclo:3}
+};
+var borrador=null;
+function pintarEstrategia(){
+  var c=datos.config;if(!c){$('params').innerHTML='<p class="empty">Conecta tu nube primero.</p>';return}
+  if(!borrador)borrador=JSON.parse(JSON.stringify(c));
+  pintarReparto();
+  $('params').innerHTML=PARAMS.map(function(p){return '<div class="param"><span>'+p[1]+(p[2]?'<small>'+p[2]+'</small>':'')+'</span><input type="number" step="any" data-p="'+p[0]+'" value="'+esc(borrador[p[0]])+'"></div>'}).join('')+
+    '<div class="param"><span>Marco de velas</span><select data-p="marco">'+['15m','1h','4h','1d'].map(function(m){return '<option'+(borrador.marco===m?' selected':'')+'>'+m+'</option>'}).join('')+'</select></div>'+
+    '<div class="param"><span>Papel de la IA<small>veto: puede frenar · confirmar: debe aprobar</small></span><select data-p="ia">'+[['off','Apagada'],['veto','Veto'],['confirmar','Confirmar']].map(function(m){return '<option value="'+m[0]+'"'+(borrador.ia===m[0]?' selected':'')+'>'+m[1]+'</option>'}).join('')+'</select></div>'+
+    '<label class="check" style="margin-top:6px"><input type="checkbox" data-p="nunca_vender_con_perdida"'+(borrador.nunca_vender_con_perdida?' checked':'')+'> Nunca vender con pérdida</label>';
+}
+function pintarReparto(){
+  var o=borrador.objetivo||{},ks=Object.keys(o),suma=0;
+  var pesos={};(((datos.estado||{}).ultimo||{}).activos||[]).forEach(function(a){pesos[a.simbolo]=a.peso});
+  $('reparto').innerHTML=ks.map(function(k){suma+=Number(o[k])||0;return '<div class="alloc"><b>'+esc(k)+'</b><div class="bar"><i style="width:'+Math.min(100,pesos[k]||0)+'%"></i><em style="left:'+Math.min(99,o[k])+'%"></em></div><input type="number" min="0" max="100" step="0.5" data-obj="'+esc(k)+'" value="'+esc(o[k])+'"><button class="small ghost" data-quitar="'+esc(k)+'" aria-label="Quitar '+esc(k)+'">✕</button></div>'}).join('')||'<p class="empty">Sin monedas: agrega alguna.</p>';
+  $('repSuma').textContent='Suma '+num(suma,1)+'% · base '+num(Math.max(0,100-suma),1)+'%';$('repSuma').className='pill'+(suma>100?' bad':'');
+}
+$('reparto').addEventListener('input',function(e){var k=e.target.getAttribute('data-obj');if(k){borrador.objetivo[k]=Number(e.target.value)||0;var s=0;for(var x in borrador.objetivo)s+=borrador.objetivo[x];$('repSuma').textContent='Suma '+num(s,1)+'% · base '+num(Math.max(0,100-s),1)+'%';$('repSuma').className='pill'+(s>100?' bad':'')}});
+$('reparto').addEventListener('click',function(e){var k=e.target.getAttribute('data-quitar');if(k){delete borrador.objetivo[k];pintarReparto()}});
+$('repAgregar').onclick=function(){var s=$('repNuevo').value.trim().toUpperCase().replace(/[^A-Z0-9]/g,'');if(!s||!borrador)return;borrador.objetivo[s]=borrador.objetivo[s]||5;$('repNuevo').value='';pintarReparto()};
+$('params').addEventListener('change',function(e){var p=e.target.getAttribute('data-p');if(!p)return;borrador[p]=e.target.type==='checkbox'?e.target.checked:e.target.tagName==='SELECT'?e.target.value:Number(e.target.value)});
+$('perfiles').onclick=function(e){var b=e.target.closest('button');if(!b||!borrador)return;var p=PERFILES[b.getAttribute('data-p')];for(var k in p)borrador[k]=p[k];pintarEstrategia();toast('Perfil aplicado: revisa y guarda')};
+$('estGuardar').onclick=function(){
+  if(!borrador)return;var cambios={};
+  PARAMS.forEach(function(p){cambios[p[0]]=borrador[p[0]]});['marco','ia','nunca_vender_con_perdida','objetivo'].forEach(function(k){cambios[k]=borrador[k]});
+  api('/api/config',cambios).then(function(d){datos.config=d.config;if(datos.estado)datos.estado.config=d.config;borrador=null;pintarEstrategia();toast('Estrategia guardada: se usa en el próximo ciclo')}).catch(function(e){toast(traduce(e),true)});
+};
+
+// ---------------------------------------------------------------- Config
+function pintarConfig(){
+  aplicarTema(S.tema);
+  var c=datos.config||{},real=c.modo==='real';
+  $('modoCfg').textContent=real?'DINERO REAL':'SIMULACIÓN';$('modoCfg').className='pill '+(real?'bad':'acento');
+  $('modoTexto').textContent=real?'Kumo opera con tu dinero real en el exchange.':'Kumo opera con una cartera virtual y precios reales. Nada toca tu dinero.';
+  $('modoBtn').textContent=real?'VOLVER A SIMULACIÓN':'ACTIVAR DINERO REAL';$('modoBtn').className=real?'secundario':'danger';
+  $('cfgUrl').value=S.demo?'(modo demo)':(S.url||'');$('cfgToken').value=S.token||'';
+  $('repoInfo').innerHTML=S.gh&&S.gh.owner?'Repositorio: <a href="#" data-url="https://github.com/'+esc(S.gh.owner)+'/'+esc(S.gh.repo)+'">'+esc(S.gh.owner)+'/'+esc(S.gh.repo)+'</a>'+(S.gh.token?'':' · <span class="warn-text">sin token en este teléfono</span>'):'Este teléfono no tiene datos del repositorio (conectado solo con token).';
+  $('appVer').textContent='v'+APP_VERSION;$('nubeVer').textContent=(datos.estado&&datos.estado.version)?'v'+datos.estado.version:'—';$('nubeVer2').textContent=$('nubeVer').textContent;
+  pintarAvisos();
+}
+$('verBienvenida').onclick=function(){abrirOnb('hola')};
+$('verToken').onclick=function(){var i=$('cfgToken');i.type=i.type==='password'?'text':'password'};
+$('copiarToken').onclick=function(){copiarTexto(S.token||'','Token copiado')};
+$('modoBtn').onclick=function(){
+  var real=(datos.config||{}).modo==='real';
+  if(real){api('/api/config',{modo:'simulacion'}).then(function(d){datos.config=d.config;if(datos.estado)datos.estado.config=d.config;pintarConfig();pintarEstado();toast('Volviste a simulación')}).catch(function(e){toast(traduce(e),true)});return}
+  confirmar('⚠ Activar dinero real','Desde el próximo ciclo Kumo comprará y venderá con tu dinero en el exchange, según tu estrategia.\n\nEl trading tiene riesgo: puedes perder dinero. Revisa montos máximos y reparto antes de seguir.','SÍ, USAR DINERO REAL').then(function(ok){
+    if(!ok)return;return confirmar('¿Seguro?','Escribe REAL para confirmar.','ACTIVAR','<input id="confReal" autocomplete="off" style="margin-top:10px">').then(function(ok2){
+      if(!ok2)return;if((document.getElementById('confReal').value||'').trim().toUpperCase()!=='REAL'){toast('No escribiste REAL: sigue en simulación',true);return}
+      api('/api/config',{modo:'real',confirmar_real:true}).then(function(d){datos.config=d.config;if(datos.estado)datos.estado.config=d.config;pintarConfig();pintarEstado();toast('Dinero real activado')}).catch(function(e){toast(traduce(e),true)});
+    });
+  });
+};
+$('reiniciarSim').onclick=function(){confirmar('Reiniciar simulación','Borra la cartera virtual y el historial. Tu dinero real no se toca.','REINICIAR').then(function(ok){if(ok)api('/api/control',{accion:'reiniciar_simulacion'}).then(function(){toast('Simulación reiniciada');cargarEstado()}).catch(function(e){toast(traduce(e),true)})})};
+$('cambiarClaves').onclick=function(){
+  if(S.demo){toast('Crea tu nube primero');abrirOnb('inicio');return}
+  W={};if(S.gh&&S.gh.repo)$('repoNombre').value=S.gh.repo;
+  abrirOnb('gh','claves');toast('Valida GitHub y cambia solo lo que necesites');
+};
+// Tu repo es una copia de la plantilla: este paso le trae el código nuevo (runner, worker y
+// workflows) en un solo commit y vuelve a desplegar. No toca kumo.json ni tus secretos.
+var RUTAS_NUBE=/^(runner\/|worker\/|\.github\/workflows\/)/;
+function actualizarCodigoNube(owner,repo,rama,aviso){
+  var dest='/repos/'+owner+'/'+repo,orig='/repos/'+PLANTILLA,refPl,tree,base,cambios=[];
+  aviso('Leyendo la plantilla…');
+  return gh('GET',orig).then(function(r){okGh(r,'Plantilla');refPl=r.data.default_branch||'main';
+    return gh('GET',orig+'/git/trees/'+refPl+'?recursive=1')}).then(function(r){okGh(r,'Archivos de la plantilla');tree=r.data.tree.filter(function(x){return x.type==='blob'&&RUTAS_NUBE.test(x.path)});
+    return gh('GET',dest+'/git/ref/heads/'+rama)}).then(function(r){okGh(r,'Tu repositorio');base=r.data.object.sha;
+    return gh('GET',dest+'/git/trees/'+base+'?recursive=1')}).then(function(r){okGh(r,'Tus archivos');
+    var mios={};r.data.tree.forEach(function(x){mios[x.path]=x.sha});
+    // mismo sha de blob = mismo contenido: solo se copian los archivos que cambiaron
+    var pend=tree.filter(function(x){return mios[x.path]!==x.sha});
+    if(!pend.length)return null;
+    var i=0;
+    function sig(){
+      if(i>=pend.length)return Promise.resolve();
+      var x=pend[i++];aviso('Copiando '+x.path+' ('+i+'/'+pend.length+')');
+      return gh('GET',orig+'/git/blobs/'+x.sha).then(function(b){okGh(b,x.path);
+        return gh('POST',dest+'/git/blobs',{content:String(b.data.content).replace(/\s/g,''),encoding:'base64'})}).then(function(b){okGh(b,'Guardar '+x.path);cambios.push({path:x.path,mode:x.mode,type:'blob',sha:b.data.sha});return sig()});
+    }
+    return sig().then(function(){return gh('POST',dest+'/git/trees',{base_tree:base,tree:cambios})}).then(function(r){okGh(r,'Árbol');
+      return gh('POST',dest+'/git/commits',{message:'Actualizar Kumo desde '+PLANTILLA+' ('+cambios.length+' archivos)',tree:r.data.sha,parents:[base]})}).then(function(r){okGh(r,'Commit');
+      return gh('PATCH',dest+'/git/refs/heads/'+rama,{sha:r.data.sha})}).then(function(r){okGh(r,'Subir cambios');return cambios.length});
+  });
+}
+$('actualizarNube').onclick=function(){
+  if(!S.gh||!S.gh.token){toast('Necesitas el token de GitHub: toca «Cambiar claves»',true);return}
+  confirmar('Actualizar nube','Copia a tu repositorio el código más reciente de Kumo (bot, nube y ciclos) y vuelve a desplegar tu nube. Tus claves, datos y ajustes se conservan.','ACTUALIZAR').then(function(ok){
+    if(!ok)return;var b=$('actualizarNube');b.disabled=true;
+    actualizarCodigoNube(S.gh.owner,S.gh.repo,S.gh.rama||'main',function(t){b.textContent=t.length>28?t.slice(0,27)+'…':t}).then(function(n){
+      return lanzarWorkflow(S.gh.owner,S.gh.repo,'instalar.yml',S.gh.rama||'main').then(function(){toast((n?n+' archivos actualizados. ':'Tu código ya estaba al día. ')+'Redesplegando la nube (2-4 min)')});
+    }).catch(function(e){toast(traduce(e),true)}).then(function(){b.disabled=false;b.textContent='ACTUALIZAR NUBE'});
+  });
+};
+$('olvidarGh').onclick=function(){if(S.gh){delete S.gh.token;guardarS();pintarConfig();toast('Token de GitHub borrado de este teléfono')}};
+$('olvidarTodo').onclick=function(){confirmar('Desconectar','Borra de este teléfono la conexión, el token y tus preferencias. Tu nube sigue funcionando.','DESCONECTAR').then(function(ok){if(!ok)return;if(NATIVO&&NATIVO.desactivar)NATIVO.desactivar();var t=S.tema;S={tema:t};guardarS();location.reload()})};
+
+
+// ---------------------------------------------------------------- Donaciones
+function copiarTexto(t,ok){
+  if(NATIVO&&NATIVO.copiar){NATIVO.copiar(t);toast(ok);return}
+  try{navigator.clipboard.writeText(t).then(function(){toast(ok)},function(){toast('No se pudo copiar: mantén pulsada la dirección',true)})}catch(e){toast('No se pudo copiar: mantén pulsada la dirección',true)}
+}
+document.addEventListener('click',function(e){
+  var c=e.target.closest('[data-copiar]');
+  if(c){copiarTexto($(c.getAttribute('data-copiar')).textContent.trim(),'Dirección copiada');return}
+  var b=e.target.closest('[data-billetera]');
+  if(b){var uri=b.getAttribute('data-billetera');
+    if(NATIVO&&NATIVO.abrirBilletera){if(!NATIVO.abrirBilletera(uri))toast('No hay billetera de '+(uri.indexOf('monero')===0?'Monero':'Bitcoin')+' instalada: copia la dirección',true)}
+    else location.href=uri;}
+});
+$('irDonar').onclick=function(){$('donar').scrollIntoView({behavior:'smooth',block:'start'})};
+
+// ---------------------------------------------------------------- Notificaciones (nativas)
+function estadoAvisos(){if(!NATIVO)return null;try{return JSON.parse(NATIVO.estado())}catch(e){return null}}
+function pintarAvisos(){
+  var e=estadoAvisos();
+  if(!e){$('avisosPill').textContent='SOLO EN LA APP';$('avisosBtn').disabled=true;$('avisosProbar').disabled=true;return}
+  var on=e.enabled&&e.permiso==='granted';
+  $('avisosPill').textContent=on?'ACTIVAS':(e.permiso==='denied'&&e.enabled?'SIN PERMISO':'APAGADAS');$('avisosPill').className='pill '+(on?'':'warn');
+  $('avisosBtn').textContent=on?'DESACTIVAR':'ACTIVAR';$('avisosBtn').className=on?'secundario':'primary';$('avisosProbar').disabled=!on;
+}
+$('avisosBtn').onclick=function(){
+  var e=estadoAvisos();if(!e)return;
+  if(e.enabled&&e.permiso==='granted'){NATIVO.desactivar();pintarAvisos();toast('Notificaciones apagadas');return}
+  if(S.demo||!S.url){toast('Conecta tu nube primero',true);return}
+  var r=NATIVO.activar(S.url,S.token);if(r==='granted')avisosListos();
+};
+window.onAvisosNativos=function(est){
+  if(est==='granted')avisosListos();
+  else if(est==='denied'){pintarAvisos();toast('Android no dio permiso: actívalo en Ajustes → Apps → Kumo Bot → Notificaciones',true)}
+  else if(String(est).indexOf('revisado:')===0){var n=Number(String(est).split(':')[1]);if(n<0)toast('No pude leer los avisos de tu nube',true)}
+};
+function avisosListos(){pintarAvisos();api('/api/avisos/probar',{}).then(function(){NATIVO.revisarAhora();toast('¡Listo! Te llegará un aviso de prueba')}).catch(function(e){toast(traduce(e),true)})}
+$('avisosProbar').onclick=function(){NATIVO&&NATIVO.probar('Kumo Bot ☁️','Así se verán tus avisos.')};
+
+// ---------------------------------------------------------------- Atrás (Android)
+window.appBack=function(){
+  if($('tuto').classList.contains('open')){if(tutoI>0){tutoI--;pintarTuto()}else cerrarTuto();return true}
+  if($('modal').classList.contains('open')){$('mNo').click();return true}
+  if($('onb').classList.contains('open')){var i=ORDEN.indexOf(pasoActual);if(pasoActual==='conectar'){irPaso('inicio');return true}if(i>0&&!instalando){irPaso(ORDEN[i-1]);return true}return !instalando?false:true}
+  var act=document.querySelector('.screen.active');if(act&&act.id!=='panel'){irA('panel');return true}
+  return false;
+};
+
+// ================================================================ DEMO
+var DEMO=(function(){
+  var ahora=Date.now(),h=[],v=1000;
+  for(var i=0;i<60;i++){v*=1+(Math.sin(i/6)*0.004+0.0012);h.push([ahora-(60-i)*1800000,Math.round(v*100)/100])}
+  var cfg={modo:'simulacion',pausado:false,quote:'USDT',objetivo:{BTC:40,ETH:25,SOL:10},monto_min:5,monto_max:25,rsi_compra:35,rsi_venta:68,banda:3,ganancia_min:1.5,stop_perdida:0,nunca_vender_con_perdida:true,ia:'veto',ia_conf_min:65,max_ops_ciclo:2,marco:'1h',saldo_simulado:1000};
+  var activos=[{simbolo:'USDT',cantidad:312.4,precio:1,valor:312.4,peso:30.2},{simbolo:'BTC',cantidad:0.00492,precio:84760,valor:417.0,peso:40.3,costo:82110,pnl:3.23,objetivo:40},{simbolo:'ETH',cantidad:0.0921,precio:2686,valor:247.4,peso:23.9,costo:2702,pnl:-0.59,objetivo:25},{simbolo:'SOL',cantidad:0.41,precio:141.3,valor:57.9,peso:5.6,costo:136.2,pnl:3.74,objetivo:10}];
+  var ops=[{ts:ahora/1000-1800,simbolo:'SOL',accion:'COMPRAR',cantidad:0.17,precio:139.9,total:24,motivo:'bajo su objetivo (3.1% de 10%) y RSI 33',simulada:true},{ts:ahora/1000-86400,simbolo:'BTC',accion:'VENDER',cantidad:0.0003,precio:85400,total:25.6,motivo:'sobre su objetivo, ganancia 4.0%',simulada:true,pnl:4.01}];
+  var radar=[['BTC',84760,0.3,2.7e9,58,'alcista',1],['ETH',2686,-1.2,1.1e9,44,'neutral',1],['SOL',141.3,2.4,4.1e8,36,'alcista',1],['XRP',0.61,-0.8,3.2e8,41,'bajista',0],['SUI',1.92,5.6,2.1e8,63,'alcista',0],['PEPE',0.0000091,-3.4,1.8e8,29,'bajista',0],['LINK',13.8,1.1,9.4e7,52,'neutral',0],['DOGE',0.131,0.4,8.8e7,47,'neutral',0]].map(function(r){return {simbolo:r[0],precio:r[1],cambio_24h:r[2],volumen:r[3],rsi:r[4],tendencia:r[5],en_cartera:!!r[6]}});
+  var feed=[{id:'1',ts:ahora-1800000,kind:'operacion',title:'🧪 Compra SOL',body:'24.00 USDT a 139.9 · bajo su objetivo y RSI 33'},{id:'2',ts:ahora-86400000,kind:'operacion',title:'🧪 Venta BTC',body:'25.60 USDT a 85400 · ganancia 4.0%'}];
+  function estado(){return {version:'1.0.0',config:cfg,ciclo:58,actualizado:ahora-600000,historial:h,costos:{BTC:{costo:82110},ETH:{costo:2702,estimado:true},SOL:{costo:136.2}},ultimo:{ok:true,exchange:'kraken',modo:cfg.modo,quote:'USDT',total:1034.7,libre:312.4,activos:activos,propuestas:[{simbolo:'SOL',accion:'COMPRAR',monto:24,motivo:'bajo su objetivo (5.6% de 10%) y RSI 33'}],bloqueadas:[],ejecutadas:[ops[0]],notas:['ETH: vendería, pero no hay ganancia suficiente (-0.6%)'],errores:[],ia:{modelo:'qwen/qwen3.8-27b',modo:'veto',opiniones:{SOL:{accion:'COMPRAR',confianza:68,razon:'Rebote desde soporte con RSI bajo y volumen estable.'}}}}}}
+  return {api:function(ruta,cuerpo){
+    if(ruta==='/api/estado')return estado();
+    if(ruta==='/api/operaciones')return {operaciones:ops};
+    if(ruta.indexOf('/api/feed')===0)return {items:feed,now:Date.now()};
+    if(ruta==='/api/radar')return {radar:radar,actualizado:ahora-600000};
+    if(ruta==='/api/radar/analizar'){var f=radar.filter(function(x){return x.simbolo===cuerpo.simbolo})[0]||{};var bueno=f.rsi<45&&f.tendencia!=='bajista';return {simbolo:cuerpo.simbolo,veredicto:bueno?'INCORPORAR':f.simbolo==='PEPE'?'NO INCORPORAR':'ESPERAR',confianza:bueno?72:55,resena:'(Demo) '+cuerpo.simbolo+' muestra RSI '+f.rsi+' y tendencia '+f.tendencia+'. En la app real, la IA de tu nube escribe aquí la reseña del proyecto.',riesgos:['Volatilidad alta','Ejemplo de demostración'],entrada:f.precio?f.precio*0.98:null,pct_sugerido:bueno?4:2,modelo:'demo'}}
+    if(ruta==='/api/radar/incluir'){cfg.objetivo[cuerpo.simbolo]=cuerpo.pct;return {ok:true,config:cfg}}
+    if(ruta==='/api/radar/pedir')return {ok:true};
+    if(ruta==='/api/config'){if(cuerpo){for(var k in cuerpo)if(k!=='confirmar_real')cfg[k]=cuerpo[k]}return {ok:true,config:cfg}}
+    if(ruta==='/api/control'){if(cuerpo.accion==='pausar')cfg.pausado=true;if(cuerpo.accion==='reanudar')cfg.pausado=false;return {ok:true}}
+    if(ruta==='/api/avisos/probar'){feed.unshift({id:String(Date.now()),ts:Date.now(),kind:'prueba',title:'¡Kumo conectado! ☁️',body:'Prueba'});return {ok:true}}
+    return {};
+  }};
+})();
+
+// ================================================================ Actualizaciones
+// Consulta el último release público de la plantilla (sin token) cada 6 h como mucho.
+var REPO_APP='tradiabot/kumo-bot';
+function cmpVer(a,b){a=String(a).replace(/^v/,'').split('.');b=String(b).replace(/^v/,'').split('.');for(var i=0;i<3;i++){var d=(+a[i]||0)-(+b[i]||0);if(d)return d>0?1:-1}return 0}
+function pintarUpd(){
+  var u=S.upd,hay=u&&cmpVer(u.tag,APP_VERSION)>0;
+  $('updBanda').classList.toggle('oculto',!hay);
+  if(hay)$('updBanda').textContent='⬆ NUEVA VERSIÓN '+u.tag+' DISPONIBLE · TOCA PARA ACTUALIZAR';
+  $('updEstado').textContent=!u?'Aún no se ha buscado.':hay?'Hay una versión nueva: '+u.tag:'Tienes la última versión ('+'v'+APP_VERSION+'). Revisado '+new Date(u.ts).toLocaleString();
+}
+function ofrecerUpd(){
+  var u=S.upd;if(!u)return;
+  var notas=document.createElement('div');notas.className='upd-notas';notas.textContent=(u.notas||'Sin notas.').replace(/\*\*/g,'').slice(0,1500);
+  confirmar('Nueva versión '+u.tag,'Tienes v'+APP_VERSION+'. Descarga la APK e instálala encima: conservas tu nube, tu token y tus ajustes. Después toca Config → Actualizar nube para traer también las mejoras del bot.','⬇ DESCARGAR',notas.outerHTML).then(function(ok){
+    S.updVisto=u.tag;guardarS();if(ok)abrirUrl(u.apk||u.url);
+  });
+}
+// No interrumpe el tutorial ni el asistente: avisa al entrar a la app.
+function libreParaAvisar(){return !$('tuto').classList.contains('open')&&!$('onb').classList.contains('open')&&!$('modal').classList.contains('open')}
+function buscarActualizacion(manual){
+  if(!manual&&S.upd&&Date.now()-S.upd.ts<6*3600000){pintarUpd();if(cmpVer(S.upd.tag,APP_VERSION)>0&&S.updVisto!==S.upd.tag&&libreParaAvisar())ofrecerUpd();return Promise.resolve()}
+  if(manual)$('updEstado').textContent='Buscando…';
+  return fetch('https://api.github.com/repos/'+REPO_APP+'/releases/latest',{headers:{Accept:'application/vnd.github+json'}}).then(function(r){
+    if(!r.ok)throw new Error('GitHub respondió HTTP '+r.status);return r.json();
+  }).then(function(d){
+    var apk=(d.assets||[]).filter(function(a){return /\.apk$/i.test(a.name)})[0];
+    S.upd={tag:d.tag_name,notas:d.body||'',url:d.html_url,apk:apk&&apk.browser_download_url,ts:Date.now()};guardarS();pintarUpd();
+    var hay=cmpVer(S.upd.tag,APP_VERSION)>0;
+    if(hay&&(manual||(S.updVisto!==S.upd.tag&&libreParaAvisar())))ofrecerUpd();
+    else if(manual&&!hay)toast('Tienes la última versión (v'+APP_VERSION+')');
+  }).catch(function(e){if(manual){$('updEstado').textContent='No pude revisar: '+e.message;toast('No pude buscar actualizaciones',true)}});
+}
+$('updBanda').onclick=ofrecerUpd;
+$('buscarUpd').onclick=function(){buscarActualizacion(true)};
+$('verNovedades').onclick=function(){abrirUrl('https://github.com/'+REPO_APP+'/releases')};
+
+// ================================================================ Arranque
+var refresco;
+function iniciarApp(){
+  $('demoBanda').classList.toggle('oculto',!S.demo);
+  clearInterval(refresco);
+  if(!S.url&&!S.demo){conn(false,'SIN NUBE');return}
+  buscarActualizacion(false);
+  cargarEstado();refresco=setInterval(function(){if(!document.hidden)cargarEstado()},60000);
+}
+aplicarTema(S.tema||'pro');
+$('appVer').textContent='v'+APP_VERSION;
+setTimeout(function(){buscarActualizacion(false)},2500);
+if(!S.onb||(!S.url&&!S.demo)){abrirOnb('hola');if(!S.tuto)abrirTuto(0)}else iniciarApp();
+window.__kumo={tuto:function(){return tutoI},S:S,datos:datos,irPaso:irPaso,irA:irA,W:function(){return W}};
+})();
+</script>
+</body>
+</html>

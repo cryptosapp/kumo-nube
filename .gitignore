@@ -1,0 +1,11 @@
+node_modules/
+worker/wrangler.toml
+__pycache__/
+*.pyc
+.wrangler/
+app/android/build/
+app/android/app/build/
+app/android/.gradle/
+*.apk
+*.keystore
+local.properties

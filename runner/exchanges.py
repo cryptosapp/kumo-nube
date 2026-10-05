@@ -68,6 +68,42 @@ class CcxtExchange:
         self.ex = getattr(ccxt, exchange_id)(opciones)
         self.con_claves = bool(api_key)
         self._mercados = None
+        self._cuenta_lista = exchange_id not in BILLETERA
+        self.aviso_cuenta = None  # explicación para el usuario si se corrigió la dirección
+
+    def _info_hl(self, cuerpo):
+        req = urllib.request.Request("https://api.hyperliquid.xyz/info", data=json.dumps(cuerpo).encode(),
+                                     headers={"Content-Type": "application/json", "User-Agent": "kumo-bot/1.0"}, method="POST")
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read().decode())
+
+    def cuenta(self):
+        """Hyperliquid: los fondos viven en la cuenta principal, no en la API wallet que firma.
+        Si el usuario pegó la dirección de la API wallet (o una dirección sin cuenta), se busca
+        la principal con «userRole» y se usa esa para leer saldos."""
+        if self._cuenta_lista or not self.con_claves:
+            return
+        self._cuenta_lista = True
+        try:
+            pegada = self.ex.walletAddress
+            rol = self._info_hl({"type": "userRole", "user": pegada})
+            if rol.get("role") in ("user", "vault", "subAccount"):
+                return
+            if rol.get("role") == "agent":
+                principal = (rol.get("data") or {}).get("user")
+                motivo = "la dirección que pegaste es la de la API wallet"
+            else:  # «missing»: quizá la clave privada es de una API wallet de otra cuenta
+                firmante = self.ex.eth_get_address_from_private_key(self.ex.privateKey)
+                rol_f = self._info_hl({"type": "userRole", "user": firmante})
+                principal = (rol_f.get("data") or {}).get("user") if rol_f.get("role") == "agent" else None
+                motivo = "la dirección que pegaste no tiene cuenta en Hyperliquid"
+            if principal:
+                self.ex.walletAddress = principal
+                self.aviso_cuenta = f"Hyperliquid: {motivo}; uso tu cuenta principal {principal[:6]}…{principal[-4:]}. Corrígelo en «Cambiar claves» cuando puedas."
+            else:
+                self.aviso_cuenta = f"Hyperliquid: {motivo} y no encontré tu cuenta principal. Pega la dirección de tu billetera principal en «Cambiar claves»."
+        except Exception as e:  # sin red o respuesta rara: se sigue con la dirección pegada
+            self.aviso_cuenta = f"Hyperliquid: no pude comprobar tu dirección ({type(e).__name__})"
 
     def _par(self, simbolo):
         return f"{simbolo.upper()}/{self.par_quote}"
@@ -87,12 +123,24 @@ class CcxtExchange:
     def saldos(self):
         if not self.con_claves:
             raise ErrorExchange("Sin claves del exchange: solo modo simulación")
+        self.cuenta()
         try:
             b = self.ex.fetch_balance()
         except ccxt.BaseError as e:
             raise ErrorExchange(_explicar(self.id, e))
         total = b.get("total") or {}
         return {k.upper(): _f(v) for k, v in total.items() if _f(v) > 0}
+
+    def saldo_perps(self):
+        """USDC en la cuenta de futuros (Perps). Hyperliquid la separa de Spot, que es donde opera Kumo."""
+        if self.id != "hyperliquid" or not self.con_claves:
+            return 0.0
+        self.cuenta()
+        try:
+            b = self.ex.fetch_balance({"type": "swap"})
+        except ccxt.BaseError:
+            return 0.0
+        return _f((b.get("total") or {}).get("USDC"))
 
     def precios(self, simbolos):
         pares = [self._par(s) for s in simbolos if s.upper() != self.quote and self.existe(s)]

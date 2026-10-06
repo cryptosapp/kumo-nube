@@ -8,6 +8,7 @@ Las nubes antiguas solo tienen GROQ_API_KEY: entonces se usa Groq como antes.
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 
@@ -53,6 +54,16 @@ def _llamar(url, clave, modelo, mensajes, formato_json=True):
     return resp["choices"][0]["message"]["content"]
 
 
+# Bitácora de llamadas a la IA de este ciclo (se manda en el reporte para que la
+# app muestre si la IA está respondiendo, con qué modelo y cuánto tarda).
+LOG = []
+
+
+def _anotar(proveedor_, modelo, ok, t0, error=None):
+    LOG.append({"ts": int(time.time() * 1000), "proveedor": proveedor_, "modelo": modelo, "ok": ok,
+                "ms": int((time.time() - t0) * 1000), "error": error})
+
+
 def chat_json(mensajes):
     """Prueba cada modelo hasta que uno responda JSON. Devuelve (dict, modelo, error)."""
     prov = proveedor()
@@ -64,10 +75,14 @@ def chat_json(mensajes):
     ultimo_error = None
     for modelo in modelos:
         for formato_json in (True, False):
+            t0 = time.time()
             try:
-                return extraer_json(_llamar(url, clave, modelo, mensajes, formato_json)), modelo, None
+                datos = extraer_json(_llamar(url, clave, modelo, mensajes, formato_json))
+                _anotar(nombre, modelo, True, t0)
+                return datos, modelo, None
             except urllib.error.HTTPError as e:
                 ultimo_error = f"{nombre} HTTP {e.code} con {modelo}"
+                _anotar(nombre, modelo, False, t0, f"HTTP {e.code}")
                 if e.code in (401, 403):
                     return None, None, ultimo_error
                 if e.code == 400 and formato_json:
@@ -75,23 +90,34 @@ def chat_json(mensajes):
                 break
             except Exception as e:  # red, JSON inválido, etc.
                 ultimo_error = f"{nombre}: {type(e).__name__} con {modelo}"
+                _anotar(nombre, modelo, False, t0, type(e).__name__)
                 break
     return None, None, ultimo_error
 
 
-def opinar(propuestas, contexto):
-    """Devuelve ({SIMBOLO: {accion, confianza, razon}}, modelo|None, error|None)."""
-    if not propuestas:
+def opinar(propuestas, contexto, vigilar=None):
+    """Devuelve ({SIMBOLO: {accion, confianza, razon}}, modelo|None, error|None).
+    Si no hay propuestas, da su señal sobre las monedas de `vigilar` para que el
+    usuario vea en cada ciclo qué piensa la IA del mercado."""
+    if not propuestas and not vigilar:
         return {}, None, None
-    filas = [{k: p.get(k) for k in ("simbolo", "accion", "precio", "rsi", "tendencia", "peso", "objetivo", "pnl", "motivo")} for p in propuestas]
+    if propuestas:
+        filas = [{k: p.get(k) for k in ("simbolo", "accion", "precio", "rsi", "tendencia", "peso", "objetivo", "pnl", "motivo")} for p in propuestas]
+        pedido = ("La estrategia automática propone estas operaciones spot. Para cada símbolo opina "
+                  "COMPRAR, VENDER o ESPERAR, con confianza 0-100 y una razón breve (máx. 20 palabras). "
+                  "Sé escéptico: si los datos no lo justifican, ESPERAR.\n"
+                  f"Propuestas: {json.dumps(filas, ensure_ascii=False)}\n")
+        extra = [s for s in (vigilar or []) if s not in {p["simbolo"] for p in propuestas}]
+        if extra:
+            pedido += f"Da también tu señal para: {', '.join(extra)}.\n"
+    else:
+        pedido = ("No hay operaciones propuestas en este ciclo. Da tu señal spot para cada una de estas "
+                  f"monedas: {', '.join(vigilar)}. Para cada una: COMPRAR, VENDER o ESPERAR, confianza 0-100 "
+                  "y una razón breve (máx. 20 palabras). Sé escéptico: si los datos no lo justifican, ESPERAR.\n")
     mensajes = [
         {"role": "system", "content": "Eres un analista de riesgo cripto prudente. Respondes SOLO JSON válido en español."},
         {"role": "user", "content": (
-            "La estrategia automática propone estas operaciones spot. Para cada símbolo opina "
-            "COMPRAR, VENDER o ESPERAR, con confianza 0-100 y una razón breve (máx. 20 palabras). "
-            "Sé escéptico: si los datos no lo justifican, ESPERAR.\n"
-            f"Contexto: {json.dumps(contexto, ensure_ascii=False)}\n"
-            f"Propuestas: {json.dumps(filas, ensure_ascii=False)}\n"
+            pedido + f"Contexto: {json.dumps(contexto, ensure_ascii=False)}\n"
             'Formato: {"opiniones":[{"simbolo":"BTC","accion":"ESPERAR","confianza":60,"razon":"..."}]}'
         )},
     ]

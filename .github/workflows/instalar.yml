@@ -78,7 +78,7 @@ jobs:
         run: |
           sed "s/__KV_ID__/${{ steps.kv.outputs.id }}/" wrangler.toml.plantilla > wrangler.toml
           npm install --no-audit --no-fund
-          npx wrangler deploy
+          npx wrangler deploy --var "KUMO_VERSION:$(cat ../runner/version.txt 2>/dev/null || echo 1.0.0)"
           printf '%s' "$APP" | npx wrangler secret put APP_TOKEN
           printf '%s' "$RUN" | npx wrangler secret put RUNNER_TOKEN
           # Secretos de IA: se ponen si existen y se borran si ya no (al cambiar de proveedor).

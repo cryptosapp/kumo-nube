@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import estrategia as E  # noqa: E402
 import ia  # noqa: E402
+import ordenes as O  # noqa: E402
 from exchanges import ESTABLES, ErrorExchange, Simulador, crear_exchange, crear_publico  # noqa: E402
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -82,7 +83,8 @@ def ciclo(remoto):
     saldos = ex.saldos()
     real = saldo_real(base, exchange_id, quote, saldos if not simulado else None, notas) if clave else None
     tenidos = [s for s in saldos if s != quote and s not in ESTABLES]
-    simbolos = sorted(set(cfg["objetivo"]) | set(tenidos))
+    pendientes = [o for o in (remoto.get("ordenes") or []) if o.get("estado") in ("propuesta", "aprobada")]
+    simbolos = sorted(set(cfg["objetivo"]) | set(tenidos) | {o["simbolo"] for o in pendientes})
     mercado = ex.precios(simbolos)
     precios = {s: d["precio"] for s, d in mercado.items()}
     sin_par = [s for s in tenidos if s not in precios]
@@ -91,16 +93,47 @@ def ciclo(remoto):
     ind = indicadores(ex, [s for s in simbolos if s in precios], cfg["marco"])
 
     costos = E.actualizar_costos(estado.get("costos") or {}, saldos, precios)
+
+    # 1) Órdenes que tú aprobaste (o creaste) y las de la IA ya aprobadas.
+    ordenes_upd, ejecutadas = [], []
+    if not cfg["pausado"]:
+        for o in [o for o in pendientes if o.get("estado") == "aprobada"]:
+            upd, op = O.ejecutar(ex, o, saldos, precios, costos, cfg, simulado)
+            ordenes_upd.append(upd)
+            if op:
+                ejecutadas.append(op)
+                saldos = ex.saldos()
+            elif upd.get("error"):
+                errores.append(f"Orden {o['accion']} {o['simbolo']}: {upd['error']}")
     propuestas, notas_e = E.proponer(cfg, saldos, precios, ind, costos)
     notas += notas_e
 
     contexto = {"exchange": exchange_id, "quote": quote, "mercado": {s: {**mercado.get(s, {}), **ind.get(s, {})} for s in simbolos if s in precios}}
-    opiniones, modelo, error_ia = ia.opinar(propuestas, contexto) if cfg["ia"] != "off" else ({}, None, None)
+    # La IA opina de las propuestas y además da su señal de las monedas del reparto
+    # y las que tienes, para que la app muestre en cada ciclo qué está pensando.
+    vigilar = [s for s in simbolos if s in precios][:8]
+    opiniones, modelo, error_ia = ia.opinar(propuestas, contexto, vigilar) if cfg["ia"] != "off" else ({}, None, None)
+    for s, o in opiniones.items():
+        if s in precios:
+            o["precio"] = precios[s]
     if error_ia:
         errores.append(error_ia)
     aprobadas, bloqueadas = E.aplicar_ia(cfg, propuestas, opiniones)
 
-    ejecutadas = []
+    # 2) Señales fuertes de la IA → órdenes nuevas (propuestas, o ejecutadas en modo auto).
+    nuevas = O.de_la_ia(cfg, opiniones, saldos, precios, pendientes)
+    for i, o in enumerate(nuevas):
+        o["id"] = f"ia{int(time.time())}{i}"
+        o["estado"] = "propuesta"
+        if cfg.get("ordenes_ia") == "auto" and not cfg["pausado"]:
+            o["estado"] = "aprobada"
+            upd, op = O.ejecutar(ex, o, saldos, precios, costos, cfg, simulado)
+            o.update({k: v for k, v in upd.items() if k != "id"})
+            if op:
+                ejecutadas.append(op)
+                saldos = ex.saldos()
+
+    fallidas = {}
     if cfg["pausado"]:
         notas.append("Bot en pausa: no se ejecutan operaciones")
     else:
@@ -118,6 +151,7 @@ def ciclo(remoto):
                 saldos = ex.saldos()
             except ErrorExchange as e:
                 errores.append(f"{p['accion']} {sym}: {e}")
+                fallidas[(sym, p["accion"])] = str(e)[:160]
 
     precios_fin = dict(precios)
     total, activos = E.valorar(saldos, precios_fin, quote)
@@ -149,7 +183,32 @@ def ciclo(remoto):
         "propuestas": propuestas, "bloqueadas": bloqueadas, "ejecutadas": ejecutadas,
         "notas": notas[:20], "errores": errores[:10], "ia": {"modelo": modelo, "modo": cfg["ia"], "opiniones": opiniones},
         "radar": radar, "real": real,
+        "ordenes_upd": ordenes_upd, "ordenes_nuevas": nuevas, "ia_log": ia.LOG[-20:],
+        "ordenes": ordenes_ia(propuestas, bloqueadas, ejecutadas, fallidas, cfg["pausado"], opiniones),
     }
+
+
+def ordenes_ia(propuestas, bloqueadas, ejecutadas, fallidas, pausado, opiniones):
+    """Qué pasó con cada orden propuesta y qué dijo la IA de ella."""
+    hechas = {(o["simbolo"], o["accion"]): o for o in ejecutadas}
+    frenadas = {(b["simbolo"], b["accion"]) for b in bloqueadas}
+    out = []
+    for p in propuestas:
+        k = (p["simbolo"], p["accion"])
+        if k in hechas:
+            res, total = "ejecutada", hechas[k]["total"]
+        elif k in frenadas:
+            res, total = "frenada", None
+        elif pausado:
+            res, total = "pausa", None
+        elif k in fallidas:
+            res, total = "error", None
+        else:
+            res, total = "pendiente", None
+        o = opiniones.get(p["simbolo"])
+        out.append({"simbolo": p["simbolo"], "accion": p["accion"], "monto": p.get("monto"), "motivo": p.get("motivo"),
+                    "resultado": res, "total": total, "error": fallidas.get(k), "ia": o})
+    return out
 
 
 def saldo_real(base, exchange_id, quote, saldos=None, notas=None):
@@ -187,7 +246,12 @@ def main():
         reporte["ok"] = True
     except Exception as e:  # se reporta para que la app lo muestre
         traceback.print_exc()
-        reporte = {"ok": False, "errores": [f"{type(e).__name__}: {str(e)[:300]}"]}
+        # Con qué exchange falló: si el usuario cambia de exchange, la app no
+        # debe mostrar el error viejo como si fuera del nuevo.
+        cfg = remoto.get("config") or {}
+        reporte = {"ok": False, "exchange": os.getenv("EXCHANGE_ID", "kraken").strip().lower() or "kraken",
+                   "modo": "real" if cfg.get("modo") == "real" else "simulacion",
+                   "errores": [f"{type(e).__name__}: {str(e)[:300]}"]}
     reporte["duracion"] = round(time.time() - inicio, 1)
     resp = http("POST", url + "/runner/reporte", token, reporte)
     # Sin saldos ni claves en el log: solo un resumen.

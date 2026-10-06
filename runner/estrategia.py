@@ -21,6 +21,8 @@ CONFIG_DEFECTO = {
     "nunca_vender_con_perdida": True,
     "ia": "veto",                  # off | veto | confirmar
     "ia_conf_min": 65,
+    "ordenes_ia": "proponer",      # off | proponer (esperan tu OK) | auto (la IA ejecuta sola)
+    "orden_horas": 24,             # las órdenes pendientes caducan a las N horas
     "max_ops_ciclo": 2,
     "marco": "1h",
     "saldo_simulado": 1000.0,

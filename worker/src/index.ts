@@ -14,9 +14,10 @@ export interface Env {
   IA_CLAVE?: string;
   GROQ_API_KEY?: string;
   GROQ_MODEL?: string;
+  // Versión del código de la nube (runner/version.txt), la pone instalar.yml.
+  KUMO_VERSION?: string;
 }
 
-const VERSION = '1.0.0';
 const GROQ_MODELOS = ['qwen/qwen3.8-27b', 'openai/gpt-oss-120b', 'llama-3.3-70b-versatile'];
 
 type Json = Record<string, any>;
@@ -25,13 +26,13 @@ const CONFIG_DEFECTO: Json = {
   modo: 'simulacion', pausado: false, quote: 'USDT', objetivo: { BTC: 40, ETH: 30 },
   monto_min: 5, monto_max: 25, rsi_compra: 35, rsi_venta: 68, banda: 3, ganancia_min: 1.5,
   stop_perdida: 0, nunca_vender_con_perdida: true, ia: 'veto', ia_conf_min: 65, max_ops_ciclo: 2,
-  marco: '1h', saldo_simulado: 1000, radar_pedidos: [],
+  marco: '1h', saldo_simulado: 1000, radar_pedidos: [], ordenes_ia: 'proponer', orden_horas: 24,
 };
 
 // Límites duros: la app no puede guardar valores fuera de estos rangos.
 const RANGOS: Record<string, [number, number]> = {
   monto_min: [1, 1000], monto_max: [1, 5000], rsi_compra: [5, 60], rsi_venta: [40, 95], banda: [0, 20],
-  ganancia_min: [0, 50], stop_perdida: [0, 50], ia_conf_min: [0, 100], max_ops_ciclo: [0, 10], saldo_simulado: [10, 1000000],
+  ganancia_min: [0, 50], stop_perdida: [0, 50], ia_conf_min: [0, 100], max_ops_ciclo: [0, 10], saldo_simulado: [10, 1000000], orden_horas: [1, 168],
 };
 
 const CORS = {
@@ -88,6 +89,10 @@ function validarConfig(actual: Json, cambios: Json): { config?: Json; error?: st
     if (!['off', 'veto', 'confirmar'].includes(cambios.ia)) return { error: 'ia inválida' };
     c.ia = cambios.ia;
   }
+  if (cambios.ordenes_ia !== undefined) {
+    if (!['off', 'proponer', 'auto'].includes(cambios.ordenes_ia)) return { error: 'ordenes_ia inválido' };
+    c.ordenes_ia = cambios.ordenes_ia;
+  }
   if (cambios.nunca_vender_con_perdida !== undefined) c.nunca_vender_con_perdida = Boolean(cambios.nunca_vender_con_perdida);
   if (cambios.objetivo !== undefined) {
     const obj: Json = {};
@@ -117,22 +122,241 @@ async function avisar(env: Env, items: Json[]) {
   await env.KUMO.put('feed', JSON.stringify([...nuevos.reverse(), ...feed].slice(0, 30)));
 }
 
+// ---------------------------------------------------------------- Señales de la IA
+// Historial de lo que dijo la IA en cada ciclo y qué pasó con cada orden, para
+// que la app lo muestre en vivo. Una escritura de KV por ciclo con señales.
+const MAX_SENALES = 60;
+async function guardarSenales(env: Env, ciclo: number, ts: number, r: Json): Promise<void> {
+  const op: Json = r.ia?.opiniones || {};
+  const senales = Object.keys(op).map((s) => ({ simbolo: s, ...op[s] }));
+  const ordenes: Json[] = Array.isArray(r.ordenes) ? r.ordenes : [];
+  if (!senales.length && !ordenes.length) return;
+  const lista = await leer<Json[]>(env, 'senales', []);
+  const item = { tipo: 'ciclo', ciclo, ts, modelo: r.ia?.modelo || null, modo_ia: r.ia?.modo || null, modo: r.modo, quote: r.quote, senales, ordenes };
+  await env.KUMO.put('senales', JSON.stringify([item, ...lista].slice(0, MAX_SENALES)));
+}
+
+// ---------------------------------------------------------------- Órdenes
+// Cola de órdenes explícitas: propuestas por la IA o creadas por el usuario.
+// propuesta → (aprobar) → aprobada → (el runner la ejecuta) → ejecutada | error
+// propuesta/aprobada → cancelada | caducada (orden_horas sin ejecutarse).
+const MAX_ORDENES = 80;
+const PENDIENTE = (o: Json) => o.estado === 'propuesta' || o.estado === 'aprobada';
+
+async function leerOrdenes(env: Env): Promise<Json[]> {
+  return leer<Json[]>(env, 'ordenes', []);
+}
+async function guardarOrdenes(env: Env, lista: Json[]): Promise<void> {
+  // Las pendientes nunca se recortan; de las cerradas quedan las más nuevas.
+  const pend = lista.filter(PENDIENTE), cerradas = lista.filter((o) => !PENDIENTE(o));
+  await env.KUMO.put('ordenes', JSON.stringify([...pend, ...cerradas].sort((a, b) => b.ts - a.ts).slice(0, Math.max(MAX_ORDENES, pend.length))));
+}
+function nuevoId(prefijo: string): string {
+  return prefijo + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+function textoOrden(o: Json): string {
+  return `${o.accion === 'COMPRAR' ? 'Compra' : 'Venta'} ${o.simbolo} ${o.accion === 'COMPRAR' ? `${o.monto} ${o.quote || ''}`.trim() : `${o.pct}%`}${o.limite ? ` si ${o.accion === 'COMPRAR' ? '≤' : '≥'} ${o.limite}` : ''}`;
+}
+
+// Valida lo que llega de la app o de la IA. Devuelve la orden limpia o un error.
+function limpiarOrden(base: Json, c: Json, config: Json): { orden?: Json; error?: string } {
+  const o: Json = { ...base };
+  if (c.simbolo !== undefined) { o.simbolo = limpiarSimbolo(c.simbolo); if (!o.simbolo) return { error: 'Moneda inválida' }; }
+  if (c.accion !== undefined) {
+    const a = String(c.accion).toUpperCase();
+    if (!['COMPRAR', 'VENDER'].includes(a)) return { error: 'La acción debe ser COMPRAR o VENDER' };
+    o.accion = a;
+  }
+  if (!o.simbolo || !o.accion) return { error: 'Falta la moneda o la acción' };
+  if (o.simbolo === String(config.quote).toUpperCase()) return { error: `${o.simbolo} es tu moneda base` };
+  if (o.accion === 'COMPRAR') {
+    const m = Number(c.monto ?? o.monto);
+    if (!(m >= 1 && m <= 100000)) return { error: 'Monto inválido (mínimo 1)' };
+    o.monto = Math.round(m * 100) / 100; delete o.pct;
+  } else {
+    const p = Number(c.pct ?? o.pct ?? 100);
+    if (!(p >= 1 && p <= 100)) return { error: 'El % a vender va de 1 a 100' };
+    o.pct = Math.round(p); delete o.monto;
+  }
+  if (c.limite !== undefined) {
+    const l = c.limite === null || c.limite === '' ? null : Number(c.limite);
+    if (l !== null && !(l > 0)) return { error: 'Precio límite inválido' };
+    o.limite = l;
+  }
+  if (c.permitir_perdida !== undefined) o.permitir_perdida = Boolean(c.permitir_perdida);
+  if (c.razon !== undefined) o.razon = String(c.razon).slice(0, 240);
+  o.quote = config.quote;
+  return { orden: o };
+}
+
+async function mezclarOrdenes(env: Env, ahora: number, r: Json): Promise<void> {
+  const upd: Json[] = Array.isArray(r.ordenes_upd) ? r.ordenes_upd : [];
+  const nuevas: Json[] = Array.isArray(r.ordenes_nuevas) ? r.ordenes_nuevas : [];
+  let lista = await leerOrdenes(env);
+  const config = await leerConfig(env);
+  let cambio = false;
+  const eventos: Json[] = [];
+  for (const u of upd) {
+    const o = lista.find((x) => x.id === u.id);
+    if (!o) continue;
+    // Si el usuario la canceló mientras corría el ciclo, solo cuenta si de verdad se ejecutó.
+    if (o.estado === 'cancelada' && u.estado !== 'ejecutada') continue;
+    if (o.estado !== u.estado) eventos.push({ tipo: 'orden', ok: u.estado !== 'error', texto: `${textoOrden(o)}: ${u.estado}${u.error ? ` · ${u.error}` : ''}`, id: o.id });
+    if (o.estado !== u.estado || o.nota !== u.nota) cambio = true;
+    Object.assign(o, { estado: u.estado, nota: u.nota || null, error: u.error || null, resultado: u.resultado || o.resultado || null, ts_mod: ahora });
+  }
+  for (const n of nuevas) {
+    const v = limpiarOrden({}, n, config);
+    if (!v.orden) continue;
+    const previa = lista.find((x) => PENDIENTE(x) && x.origen === 'ia' && x.simbolo === v.orden!.simbolo && x.accion === v.orden!.accion);
+    if (previa) continue;
+    const o: Json = { ...v.orden, id: n.id || nuevoId('ia'), ts: ahora, origen: 'ia', confianza: n.confianza, ia: n.ia || null,
+      estado: ['propuesta', 'aprobada', 'ejecutada', 'error'].includes(n.estado) ? n.estado : 'propuesta',
+      nota: n.nota || null, error: n.error || null, resultado: n.resultado || null,
+      vence: ahora + (config.orden_horas || 24) * 3600_000,
+      historia: [{ ts: ahora, quien: 'ia', texto: `Propuesta con ${n.confianza}% de confianza: ${n.razon || ''}`.trim() }] };
+    lista.unshift(o);
+    cambio = true;
+    eventos.push({ tipo: 'orden', ok: o.estado !== 'error', texto: `IA ${o.estado === 'ejecutada' ? 'ejecutó' : 'propuso'}: ${textoOrden(o)}`, id: o.id });
+  }
+  for (const o of lista) {
+    if (PENDIENTE(o) && o.vence && o.vence < ahora) {
+      o.estado = 'caducada'; o.ts_mod = ahora; cambio = true;
+      eventos.push({ tipo: 'orden', ok: true, texto: `Caducó: ${textoOrden(o)}`, id: o.id });
+    }
+  }
+  if (cambio) await guardarOrdenes(env, lista);
+  if (eventos.length) await bitacora(env, eventos.map((e) => ({ ...e, ts: ahora })));
+}
+
+async function ordenesApi(env: Env, c: Json): Promise<Response> {
+  const config = await leerConfig(env);
+  const lista = await leerOrdenes(env);
+  const ahora = Date.now();
+  const accion = String(c.accion || '');
+  const o = c.id ? lista.find((x) => x.id === c.id) : null;
+  if (c.id && !o) return json({ error: 'Esa orden ya no existe' }, 404);
+  if (o && !PENDIENTE(o)) return json({ error: `La orden ya está ${o.estado}` }, 409);
+  const hist = (x: Json, quien: string, texto: string) => { x.historia = [...(x.historia || []), { ts: ahora, quien, texto }].slice(-12); x.ts_mod = ahora; };
+
+  if (accion === 'crear') {
+    const v = limpiarOrden({}, c.orden || {}, config);
+    if (!v.orden) return json({ error: v.error }, 400);
+    const n: Json = { ...v.orden, id: nuevoId('u'), ts: ahora, origen: 'usuario', estado: 'aprobada', vence: ahora + (config.orden_horas || 24) * 3600_000 };
+    hist(n, 'usuario', `Creada: ${textoOrden(n)}`);
+    lista.unshift(n);
+    await guardarOrdenes(env, lista);
+    await bitacora(env, [{ ts: ahora, tipo: 'orden', ok: true, texto: `Creaste: ${textoOrden(n)}`, id: n.id }]);
+    return json({ ok: true, orden: n });
+  }
+  if (accion === 'editar' && o) {
+    const v = limpiarOrden(o, c.cambios || {}, config);
+    if (!v.orden) return json({ error: v.error }, 400);
+    Object.assign(o, v.orden);
+    hist(o, 'usuario', `Editada: ${textoOrden(o)}`);
+    await guardarOrdenes(env, lista);
+    await bitacora(env, [{ ts: ahora, tipo: 'orden', ok: true, texto: `Editaste: ${textoOrden(o)}`, id: o.id }]);
+    return json({ ok: true, orden: o });
+  }
+  if ((accion === 'aprobar' || accion === 'cancelar') && o) {
+    o.estado = accion === 'aprobar' ? 'aprobada' : 'cancelada';
+    if (accion === 'aprobar') o.vence = Math.max(o.vence || 0, ahora + (config.orden_horas || 24) * 3600_000);
+    hist(o, 'usuario', accion === 'aprobar' ? 'Aprobada: se ejecuta en el próximo ciclo' : 'Cancelada');
+    await guardarOrdenes(env, lista);
+    await bitacora(env, [{ ts: ahora, tipo: 'orden', ok: true, texto: `${accion === 'aprobar' ? 'Aprobaste' : 'Cancelaste'}: ${textoOrden(o)}`, id: o.id }]);
+    return json({ ok: true, orden: o });
+  }
+  if (accion === 'ia') {
+    const instruccion = String(c.instruccion || '').trim().slice(0, 400);
+    if (!instruccion) return json({ error: 'Escribe qué quieres que haga la IA' }, 400);
+    return ordenConIA(env, config, lista, o ?? null, instruccion);
+  }
+  return json({ error: 'Acción de orden desconocida' }, 400);
+}
+
+// La IA crea una orden a partir de lo que escribes, o edita una existente.
+// El resultado siempre queda como «propuesta»: tú la apruebas.
+async function ordenConIA(env: Env, config: Json, lista: Json[], o: Json | null, instruccion: string): Promise<Response> {
+  const estado = await leer<Json>(env, 'estado', {});
+  const ahora = Date.now();
+  const mercado = (estado.radar || []).slice(0, 25).map((f: Json) => ({ s: f.simbolo, p: f.precio, rsi: f.rsi, t: f.tendencia, c24: f.cambio_24h }));
+  const cartera = (estado.ultimo?.activos || []).map((a: Json) => ({ s: a.simbolo, cant: a.cantidad, valor: a.valor }));
+  const t0 = Date.now();
+  let d: Json, modelo: string;
+  try {
+    ({ datos: d, modelo } = await iaChat(env, [
+      { role: 'system', content: 'Preparas órdenes spot para un bot cripto. Respondes SOLO JSON válido en español. Eres prudente y no inventas precios.' },
+      { role: 'user', content: `${o ? `Orden actual: ${JSON.stringify({ simbolo: o.simbolo, accion: o.accion, monto: o.monto, pct: o.pct, limite: o.limite ?? null })}\nEl usuario pide cambiarla así: "${instruccion}"` : `El usuario pide esta orden: "${instruccion}"`}
+Moneda base: ${config.quote}. Mínimo por orden: ${config.monto_min} ${config.quote}. Cartera: ${JSON.stringify(cartera)}. Mercado: ${JSON.stringify(mercado)}.
+COMPRAR usa "monto" en ${config.quote}; VENDER usa "pct" (1-100 de lo que tiene). "limite" es un precio opcional (null = a mercado).
+Formato: {"simbolo":"HYPE","accion":"COMPRAR|VENDER","monto":12,"pct":null,"limite":null,"razon":"máx. 25 palabras","aviso":"riesgo o duda, o vacío"}` },
+    ]));
+  } catch (e: any) {
+    await bitacora(env, [{ ts: ahora, tipo: 'ia', ok: false, texto: `IA (órdenes) falló: ${String(e.message || e).slice(0, 160)}`, ms: Date.now() - t0 }]);
+    return json({ error: String(e.message || e) }, 502);
+  }
+  const v = limpiarOrden(o || {}, { simbolo: d.simbolo, accion: d.accion, monto: d.monto ?? undefined, pct: d.pct ?? undefined, limite: d.limite ?? null, razon: d.razon }, config);
+  await bitacora(env, [{ ts: ahora, tipo: 'ia', ok: !!v.orden, texto: `IA (órdenes) respondió con ${modelo} en ${((Date.now() - t0) / 1000).toFixed(1)} s${v.error ? ` · orden inválida: ${v.error}` : ''}`, ms: Date.now() - t0, modelo }]);
+  if (!v.orden) return json({ error: `La IA propuso algo inválido: ${v.error}` }, 422);
+  const n: Json = o || { id: nuevoId('ia'), ts: ahora, vence: ahora + (config.orden_horas || 24) * 3600_000 };
+  Object.assign(n, v.orden, { origen: o ? o.origen : 'ia', estado: 'propuesta', ia: { accion: v.orden.accion, confianza: null, razon: v.orden.razon || '' }, aviso: String(d.aviso || '').slice(0, 200) || null });
+  n.historia = [...(n.historia || []), { ts: ahora, quien: 'ia', texto: `${o ? 'Editada' : 'Creada'} por la IA («${instruccion.slice(0, 80)}»): ${textoOrden(n)}` }].slice(-12);
+  n.ts_mod = ahora;
+  if (!o) lista.unshift(n);
+  await guardarOrdenes(env, lista);
+  await bitacora(env, [{ ts: ahora, tipo: 'orden', ok: true, texto: `IA ${o ? 'editó' : 'creó'}: ${textoOrden(n)} (espera tu aprobación)`, id: n.id }]);
+  return json({ ok: true, orden: n, modelo });
+}
+
+// ---------------------------------------------------------------- Bitácora
+// Historial para saber si todo funciona: ciclos, llamadas a la IA (modelo,
+// tiempo, error), órdenes y errores. Una escritura por ciclo y por acción.
+const MAX_LOG = 200;
+async function bitacora(env: Env, items: Json[]): Promise<void> {
+  if (!items.length) return;
+  const lista = await leer<Json[]>(env, 'bitacora', []);
+  await env.KUMO.put('bitacora', JSON.stringify([...items.slice().reverse(), ...lista].slice(0, MAX_LOG)));
+}
+async function bitacoraCiclo(env: Env, ciclo: number, ahora: number, r: Json): Promise<void> {
+  const items: Json[] = [];
+  const log: Json[] = Array.isArray(r.ia_log) ? r.ia_log : [];
+  for (const l of log) {
+    items.push({ ts: Number(l.ts) || ahora, tipo: 'ia', ok: !!l.ok, ms: l.ms, modelo: l.modelo,
+      texto: l.ok ? `IA ${l.proveedor || ''} respondió con ${l.modelo} en ${(Number(l.ms) / 1000).toFixed(1)} s` : `IA ${l.proveedor || ''} falló con ${l.modelo}: ${l.error || 'error'}` });
+  }
+  if (!log.length && r.ok && r.ia?.modo && r.ia.modo !== 'off') items.push({ ts: ahora, tipo: 'ia', ok: true, texto: 'IA: no hubo nada que consultar en este ciclo' });
+  const errs: string[] = Array.isArray(r.errores) ? r.errores : [];
+  for (const e of errs.slice(0, 5)) items.push({ ts: ahora, tipo: 'error', ok: false, texto: String(e).slice(0, 240) });
+  const ops = Array.isArray(r.ejecutadas) ? r.ejecutadas.length : 0;
+  items.push({ ts: ahora, tipo: 'ciclo', ok: r.ok !== false, ciclo,
+    texto: `Ciclo #${ciclo} ${r.ok === false ? 'con error' : 'OK'} · ${r.exchange || '?'} · ${r.modo || '?'} · ${ops} operaci${ops === 1 ? 'ón' : 'ones'} · ${errs.length} error${errs.length === 1 ? '' : 'es'}${r.duracion ? ` · ${r.duracion} s` : ''}` });
+  await bitacora(env, items);
+}
+
 // ---------------------------------------------------------------- Runner
 async function runnerReporte(env: Env, r: Json): Promise<Response> {
   const estado = await leer<Json>(env, 'estado', {});
   const ciclo = (estado.ciclo || 0) + 1;
   const ahora = Date.now();
-  const historial: [number, number][] = estado.historial || [];
+  let historial: [number, number][] = estado.historial || [];
+  // La gráfica solo compara peras con peras: al cambiar de exchange o entre
+  // simulación y real empieza de cero (si no, 1000 simulados → 10 reales sale -99%).
+  const serie = r.ok ? `${r.exchange}|${r.modo}` : estado.serie;
+  if (r.ok && estado.serie !== serie) historial = [];
   if (r.ok && typeof r.total === 'number') historial.push([ahora, r.total]);
   const { radar, cartera_sim, costos, ...ultimo } = r;
   const nuevo: Json = {
-    ciclo, actualizado: ahora, ultimo: { ...ultimo, ts: ahora },
+    ciclo, actualizado: ahora, serie, ultimo: { ...ultimo, ts: ahora },
     historial: historial.slice(-500),
     runner: { costos: costos ?? estado.runner?.costos ?? {}, cartera_sim: cartera_sim ?? estado.runner?.cartera_sim ?? null },
     radar: Array.isArray(radar) && radar.length ? radar : estado.radar || [],
     radar_ts: Array.isArray(radar) && radar.length ? ahora : estado.radar_ts || null,
   };
   await env.KUMO.put('estado', JSON.stringify(nuevo));
+
+  await guardarSenales(env, ciclo, ahora, r);
+  await mezclarOrdenes(env, ahora, r);
+  await bitacoraCiclo(env, ciclo, ahora, r);
 
   const ops: Json[] = Array.isArray(r.ejecutadas) ? r.ejecutadas : [];
   if (ops.length) {
@@ -154,7 +378,8 @@ async function runnerReporte(env: Env, r: Json): Promise<Response> {
 
 async function runnerConfig(env: Env): Promise<Response> {
   const [config, estado] = await Promise.all([leerConfig(env), leer<Json>(env, 'estado', {})]);
-  return json({ config, estado_runner: estado.runner || {} });
+  const ordenes = (await leerOrdenes(env)).filter((o) => o.estado === 'propuesta' || o.estado === 'aprobada');
+  return json({ config, estado_runner: estado.runner || {}, ordenes });
 }
 
 // ---------------------------------------------------------------- IA radar
@@ -222,6 +447,7 @@ async function radarAnalizar(env: Env, cuerpo: Json): Promise<Response> {
   const fila = (estado.radar || []).find((f: Json) => f.simbolo === sym);
   if (!fila) return json({ error: `${sym} aún no tiene datos. Pide el análisis y espera el próximo ciclo.`, pendiente: true }, 404);
   const cartera = (estado.ultimo?.activos || []).map((a: Json) => ({ s: a.simbolo, peso: a.peso }));
+  const t0 = Date.now();
   const { datos: d, modelo } = await iaChat(env, [
     { role: 'system', content: 'Eres un analista cripto prudente para principiantes. Respondes SOLO JSON válido en español.' },
     { role: 'user', content: `Evalúa si conviene INCORPORAR la moneda ${sym} a un bot de trading spot.\nDatos de mercado (velas diarias del exchange del usuario): ${JSON.stringify(fila)}\nCartera actual (peso %): ${JSON.stringify(cartera)}\nModo: ${config.modo}.\nIncluye qué es el proyecto si lo conoces (sin inventar cifras), riesgos y una entrada sugerida.\nFormato: {"veredicto":"INCORPORAR|ESPERAR|NO INCORPORAR","confianza":0-100,"resena":"2-4 frases","riesgos":["..."],"entrada":numero|null,"pct_sugerido":1-10}` },
@@ -236,6 +462,10 @@ async function radarAnalizar(env: Env, cuerpo: Json): Promise<Response> {
     pct_sugerido: Math.max(1, Math.min(10, Number(d.pct_sugerido) || 3)),
   };
   analisisMem.set(sym, { ts: Date.now(), datos });
+  await bitacora(env, [{ ts: Date.now(), tipo: 'ia', ok: true, modelo, ms: Date.now() - t0, texto: `IA (Radar ${sym}) respondió con ${modelo} en ${((Date.now() - t0) / 1000).toFixed(1)} s: ${veredicto}` }]);
+  const lista = await leer<Json[]>(env, 'senales', []);
+  const item = { tipo: 'radar', ts: Date.now(), modelo, senales: [{ simbolo: sym, accion: veredicto, confianza: datos.confianza, razon: datos.resena.slice(0, 200), precio: fila.precio }] };
+  await env.KUMO.put('senales', JSON.stringify([item, ...lista].slice(0, MAX_SENALES)));
   return json(datos);
 }
 
@@ -246,8 +476,16 @@ async function api(req: Request, env: Env, ruta: string, url: URL): Promise<Resp
     case 'GET /api/estado': {
       const [config, estado] = await Promise.all([leerConfig(env), leer<Json>(env, 'estado', {})]);
       const { runner, radar, ...resto } = estado;
-      return json({ version: VERSION, config, ...resto, costos: runner?.costos || {} });
+      return json({ version: env.KUMO_VERSION || '1.0.0', config, ...resto, costos: runner?.costos || {} });
     }
+    case 'GET /api/ordenes':
+      return json({ ordenes: await leerOrdenes(env), modo: (await leerConfig(env)).ordenes_ia });
+    case 'POST /api/ordenes':
+      return ordenesApi(env, cuerpo);
+    case 'GET /api/historial':
+      return json({ items: await leer<Json[]>(env, 'bitacora', []) });
+    case 'GET /api/senales':
+      return json({ senales: await leer<Json[]>(env, 'senales', []) });
     case 'GET /api/operaciones':
       return json({ operaciones: await leer<Json[]>(env, 'operaciones', []) });
     case 'GET /api/config':
@@ -279,7 +517,10 @@ async function api(req: Request, env: Env, ruta: string, url: URL): Promise<Resp
       return json({ radar: estado.radar || [], actualizado: estado.radar_ts || null, quote: estado.ultimo?.quote, exchange: estado.ultimo?.exchange });
     }
     case 'POST /api/radar/analizar':
-      return radarAnalizar(env, cuerpo).catch((e) => json({ error: String(e.message || e) }, 502));
+      return radarAnalizar(env, cuerpo).catch(async (e) => {
+        await bitacora(env, [{ ts: Date.now(), tipo: 'ia', ok: false, texto: `IA (Radar) falló: ${String(e.message || e).slice(0, 160)}` }]);
+        return json({ error: String(e.message || e) }, 502);
+      });
     case 'POST /api/radar/pedir': {
       const sym = limpiarSimbolo(cuerpo.simbolo);
       if (!sym) return json({ error: 'Falta el símbolo' }, 400);
@@ -318,7 +559,7 @@ export default {
     try {
       if (ruta === '/' || ruta === '/api/salud') {
         const estado = await leer<Json>(env, 'estado', {});
-        return json({ ok: true, nombre: 'kumo-bot', version: VERSION, ciclo: estado.ciclo || 0, ultimo_ciclo: estado.actualizado || null });
+        return json({ ok: true, nombre: 'kumo-bot', version: env.KUMO_VERSION || '1.0.0', ciclo: estado.ciclo || 0, ultimo_ciclo: estado.actualizado || null });
       }
       if (ruta.startsWith('/runner/')) {
         if (!iguales(token(req), env.RUNNER_TOKEN)) return json({ error: 'No autorizado' }, 401);

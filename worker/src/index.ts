@@ -482,6 +482,68 @@ async function radarAnalizar(env: Env, cuerpo: Json): Promise<Response> {
   return json(datos);
 }
 
+// ---------------------------------------------------------------- Predicciones (Hyperliquid HIP-4)
+// La IA analiza una posición y SUGIERE (mantener, vender o comprar más). Kumo no
+// ejecuta nada: el usuario decide y, si quiere, lo hace en Hyperliquid.
+const prediccionMem = new Map<string, { ts: number; datos: Json }>();
+async function hlInfo(cuerpo: Json): Promise<any> {
+  const r = await fetch('https://api.hyperliquid.xyz/info', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cuerpo) });
+  if (!r.ok) throw new Error(`Hyperliquid HTTP ${r.status}`);
+  return r.json();
+}
+async function prediccionAnalizar(env: Env, c: Json): Promise<Response> {
+  const coin = String(c.coin || '');
+  if (!/^\+\d+$/.test(coin)) return json({ error: 'Predicción inválida' }, 400);
+  const mem = prediccionMem.get(coin);
+  if (mem && Date.now() - mem.ts < 10 * 60_000) return json({ ...mem.datos, cache: true });
+  const estado = await leer<Json>(env, 'estado', {});
+  const p = ((estado.ultimo?.predicciones || []) as Json[]).find((x) => x.coin === coin);
+  if (!p) return json({ error: 'Esa predicción no está en tu último ciclo: espera al próximo.' }, 404);
+  if (p.vence && p.vence < Date.now()) return json({ error: 'Esta predicción ya venció: se liquida sola.' }, 409);
+  // Datos frescos y públicos: probabilidad actual, precio del subyacente y sus últimas 24 h.
+  const mercado: Json = { pregunta: p.pregunta, tu_lado: p.lado_nombre, unidades: p.cantidad, pago_si_aciertas: p.pago_si_acierta,
+    horas_para_vencer: p.vence ? Math.round((p.vence - Date.now()) / 360_000) / 10 : null };
+  try {
+    const mids: Json = await hlInfo({ type: 'allMids' });
+    const cod = coin.slice(1);
+    mercado.precio_tu_lado = Number(mids['#' + cod] ?? p.precio);
+    mercado.prob_mercado_tu_lado_pct = Math.round(mercado.precio_tu_lado * 1000) / 10;
+    if (p.subyacente && mids[p.subyacente]) {
+      const ahora = Number(mids[p.subyacente]);
+      mercado.subyacente = p.subyacente; mercado.precio_actual = ahora; mercado.objetivo = p.objetivo;
+      mercado.distancia_al_objetivo_pct = p.objetivo ? Math.round((ahora / p.objetivo - 1) * 10000) / 100 : null;
+      const velas: Json[] = await hlInfo({ type: 'candleSnapshot', req: { coin: p.subyacente, interval: '1h', startTime: Date.now() - 24 * 3_600_000, endTime: Date.now() } });
+      const cierres = velas.map((v) => Number(v.c)).filter((x) => x > 0);
+      if (cierres.length > 2) {
+        const max = Math.max(...cierres), min = Math.min(...cierres);
+        mercado.cambio_24h_pct = Math.round((ahora / cierres[0] - 1) * 10000) / 100;
+        mercado.rango_24h = [min, max];
+        mercado.rango_24h_pct = Math.round((max / min - 1) * 10000) / 100;
+      }
+    }
+  } catch (e: any) {
+    mercado.aviso = `Sin datos frescos de Hyperliquid (${String(e?.message || e).slice(0, 80)})`;
+    mercado.precio_tu_lado = p.precio;
+  }
+  const t0 = Date.now();
+  const { datos: d, modelo } = await iaChat(env, [
+    { role: 'system', content: 'Eres un analista prudente de mercados de predicción. Explicas a un principiante en español sencillo. No prometes resultados. Respondes SOLO JSON válido.' },
+    { role: 'user', content: `El usuario tiene esta posición en un mercado de predicción de Hyperliquid (cada unidad paga 1 si acierta y 0 si no; el precio es la probabilidad que le da el mercado):\n${JSON.stringify(mercado)}\nAnaliza si su lado tiene buenas probabilidades comparando el precio actual con el objetivo, el tiempo que queda y cuánto se mueve el precio. Compara tu probabilidad con la del mercado. Sugiere UNA acción: MANTENER (esperar al vencimiento), VENDER (cerrar ahora al precio del mercado) o COMPRAR MÁS.\nFormato: {"sugerencia":"MANTENER|VENDER|COMPRAR MÁS","confianza":0-100,"prob_estimada":0-100,"analisis":"2-4 frases","riesgos":["..."]}` },
+  ]);
+  const sug = ['MANTENER', 'VENDER', 'COMPRAR MÁS'].includes(String(d.sugerencia).toUpperCase()) ? String(d.sugerencia).toUpperCase() : 'MANTENER';
+  const datos = {
+    coin, modelo, mercado, sugerencia: sug,
+    confianza: Math.max(0, Math.min(100, Number(d.confianza) || 0)),
+    prob_estimada: Number.isFinite(Number(d.prob_estimada)) ? Math.max(0, Math.min(100, Number(d.prob_estimada))) : null,
+    analisis: String(d.analisis || '').slice(0, 800),
+    riesgos: (Array.isArray(d.riesgos) ? d.riesgos : []).slice(0, 4).map((x: unknown) => String(x).slice(0, 160)),
+    ts: Date.now(),
+  };
+  prediccionMem.set(coin, { ts: Date.now(), datos });
+  await bitacora(env, [{ ts: Date.now(), tipo: 'ia', ok: true, modelo, ms: Date.now() - t0, texto: `IA (predicción ${p.pregunta} · ${p.lado_nombre}) sugirió ${sug} con ${modelo} en ${((Date.now() - t0) / 1000).toFixed(1)} s` }]);
+  return json(datos);
+}
+
 // ---------------------------------------------------------------- Gráficas
 // Las velas las lee el runner de TU exchange en cada ciclo (1h, 4h y 1d).
 async function graficasApi(env: Env, url: URL): Promise<Response> {
@@ -576,6 +638,11 @@ async function api(req: Request, env: Env, ruta: string, url: URL): Promise<Resp
       return ordenesApi(env, cuerpo);
     case 'GET /api/historial':
       return json({ items: await leer<Json[]>(env, 'bitacora', []) });
+    case 'POST /api/predicciones/analizar':
+      return prediccionAnalizar(env, cuerpo).catch(async (e) => {
+        await bitacora(env, [{ ts: Date.now(), tipo: 'ia', ok: false, texto: `IA (predicción) falló: ${String(e?.message || e).slice(0, 160)}` }]);
+        return json({ error: String(e?.message || e) }, 502);
+      });
     case 'GET /api/graficas':
       return graficasApi(env, url);
     case 'GET /api/semaforo':

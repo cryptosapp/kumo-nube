@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import estrategia as E  # noqa: E402
 import ia  # noqa: E402
 import ordenes as O  # noqa: E402
+import predicciones as PR  # noqa: E402
 from exchanges import ESTABLES, ErrorExchange, Simulador, crear_exchange, crear_publico  # noqa: E402
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -193,6 +194,18 @@ def ciclo(remoto):
 
     precios_fin = dict(precios)
     total, activos = E.valorar(saldos, precios_fin, quote)
+    # Mercados de predicción de Hyperliquid de tu cuenta real (solo se muestran y valoran).
+    preds = []
+    if clave and getattr(base, "predicciones", None):
+        try:
+            preds = PR.describir(base.predicciones, base._info_hl)
+        except Exception as e:  # nunca deben tumbar el ciclo
+            notas.append(f"Predicciones: {type(e).__name__}")
+    valor_preds = round(sum(p["valor"] or 0 for p in preds), 2)
+    if not simulado and valor_preds:
+        total = round(total + valor_preds, 2)
+        for a in activos:
+            a["peso"] = round(100 * a["valor"] / total, 2) if total else 0
     for a in activos:
         c = (costos.get(a["simbolo"]) or {}).get("costo")
         a["costo"] = c
@@ -224,6 +237,7 @@ def ciclo(remoto):
         "ordenes_upd": ordenes_upd, "ordenes_nuevas": nuevas, "ia_log": ia.LOG[-20:],
         "ordenes": ordenes_ia(propuestas, bloqueadas, ejecutadas, fallidas, cfg["pausado"], opiniones),
         "graficas": graf,
+        "predicciones": preds, "valor_predicciones": valor_preds,
     }
 
 

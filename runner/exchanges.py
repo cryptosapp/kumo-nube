@@ -24,6 +24,8 @@ from decimal import Decimal, ROUND_DOWN
 
 import ccxt
 
+from predicciones import separar
+
 # Exchanges que bloquean los servidores de EE. UU. donde corre GitHub Actions.
 BLOQUEAN_EEUU = {"binance", "bybit", "okx", "bitget", "kucoin"}
 BILLETERA = {"hyperliquid"}  # se conectan con dirección + clave privada en vez de API key
@@ -71,6 +73,7 @@ class CcxtExchange:
         self._mercados = None
         self._cuenta_lista = exchange_id not in BILLETERA
         self.aviso_cuenta = None  # explicación para el usuario si se corrigió la dirección
+        self.predicciones = {}  # {"+N": cantidad} de mercados de predicción (Hyperliquid)
 
     def _info_hl(self, cuerpo):
         req = urllib.request.Request("https://api.hyperliquid.xyz/info", data=json.dumps(cuerpo).encode(),
@@ -135,7 +138,10 @@ class CcxtExchange:
         except ccxt.BaseError as e:
             raise ErrorExchange(_explicar(self.id, e))
         total = b.get("total") or {}
-        return {k.upper(): _f(v) for k, v in total.items() if _f(v) > 0}
+        saldos = {k.upper(): _f(v) for k, v in total.items() if _f(v) > 0}
+        # Hyperliquid: los mercados de predicción («+N») no son monedas; van aparte.
+        saldos, self.predicciones = separar(saldos)
+        return saldos
 
     def saldo_perps(self):
         """USDC en la cuenta de futuros (Perps). Hyperliquid la separa de Spot, que es donde opera Kumo."""

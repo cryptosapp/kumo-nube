@@ -115,7 +115,7 @@ def ciclo(remoto):
     real = saldo_real(base, exchange_id, quote, saldos if not simulado else None, notas) if clave else None
     tenidos = [s for s in saldos if s != quote and s not in ESTABLES]
     pendientes = [o for o in (remoto.get("ordenes") or []) if o.get("estado") in ("propuesta", "aprobada")]
-    simbolos = sorted(set(cfg["objetivo"]) | set(tenidos) | {o["simbolo"] for o in pendientes})
+    simbolos = sorted(set(cfg["objetivo"]) | set(tenidos) | {o["simbolo"] for o in pendientes if o.get("tipo") != "prediccion"})
     mercado = ex.precios(simbolos)
     precios = {s: d["precio"] for s, d in mercado.items()}
     sin_par = [s for s in tenidos if s not in precios]

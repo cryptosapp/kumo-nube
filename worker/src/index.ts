@@ -155,11 +155,13 @@ function nuevoId(prefijo: string): string {
   return prefijo + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 function textoOrden(o: Json): string {
+  if (o.tipo === 'prediccion') return `${o.accion === 'COMPRAR' ? 'Compra' : 'Venta'} ${o.unidades} × ${o.etiqueta || o.coin} a ${o.accion === 'COMPRAR' ? '≤' : '≥'} ${o.limite}`;
   return `${o.accion === 'COMPRAR' ? 'Compra' : 'Venta'} ${o.simbolo} ${o.accion === 'COMPRAR' ? `${o.monto} ${o.quote || ''}`.trim() : `${o.pct}%`}${o.limite ? ` si ${o.accion === 'COMPRAR' ? '≤' : '≥'} ${o.limite}` : ''}`;
 }
 
 // Valida lo que llega de la app o de la IA. Devuelve la orden limpia o un error.
 function limpiarOrden(base: Json, c: Json, config: Json): { orden?: Json; error?: string } {
+  if (c.tipo === 'prediccion' || base.tipo === 'prediccion') return limpiarPrediccion(base, c, config);
   const o: Json = { ...base };
   if (c.simbolo !== undefined) { o.simbolo = limpiarSimbolo(c.simbolo); if (!o.simbolo) return { error: 'Moneda inválida' }; }
   if (c.accion !== undefined) {
@@ -186,6 +188,28 @@ function limpiarOrden(base: Json, c: Json, config: Json): { orden?: Json; error?
   if (c.permitir_perdida !== undefined) o.permitir_perdida = Boolean(c.permitir_perdida);
   if (c.razon !== undefined) o.razon = String(c.razon).slice(0, 240);
   o.quote = config.quote;
+  return { orden: o };
+}
+
+// Órdenes en mercados de predicción de Hyperliquid: «#N» (N = 10 × mercado + lado),
+// unidades enteras y precio límite = probabilidad (0.001–0.999). Se ejecutan como IOC.
+function limpiarPrediccion(base: Json, c: Json, config: Json): { orden?: Json; error?: string } {
+  const o: Json = { ...base, tipo: 'prediccion' };
+  if (c.coin !== undefined) { if (!/^#\d{2,9}$/.test(String(c.coin))) return { error: 'Mercado inválido' }; o.coin = String(c.coin); }
+  if (c.accion !== undefined) {
+    const a = String(c.accion).toUpperCase();
+    if (!['COMPRAR', 'VENDER'].includes(a)) return { error: 'La acción debe ser COMPRAR o VENDER' };
+    o.accion = a;
+  }
+  if (!o.coin || !o.accion) return { error: 'Falta el mercado o la acción' };
+  const u = Number(c.unidades ?? o.unidades);
+  if (!(Number.isInteger(u) && u >= 1 && u <= 100000)) return { error: 'Unidades: número entero desde 1' };
+  const l = Number(c.limite ?? o.limite);
+  if (!(l >= 0.001 && l <= 0.999)) return { error: 'El precio límite va de 0.001 a 0.999' };
+  o.unidades = u; o.limite = Math.round(l * 10000) / 10000; o.simbolo = o.coin;
+  if (c.etiqueta !== undefined) o.etiqueta = String(c.etiqueta).slice(0, 90);
+  if (c.razon !== undefined) o.razon = String(c.razon).slice(0, 240);
+  o.quote = config.quote; delete o.monto; delete o.pct;
   return { orden: o };
 }
 
@@ -491,17 +515,101 @@ async function hlInfo(cuerpo: Json): Promise<any> {
   if (!r.ok) throw new Error(`Hyperliquid HTTP ${r.status}`);
   return r.json();
 }
+function campos(desc: unknown): Json {
+  const out: Json = {};
+  for (const parte of String(desc || '').split('|')) { const i = parte.indexOf(':'); if (i > 0) out[parte.slice(0, i).trim()] = parte.slice(i + 1).trim(); }
+  return out;
+}
+function venceMs(t: unknown): number | null {
+  const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})$/.exec(String(t || ''));
+  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) : null;
+}
+// Φ(x) (Abramowitz-Stegun 7.1.26).
+function normal(x: number): number {
+  const t = 1 / (1 + 0.3275911 * Math.abs(x) / Math.SQRT2);
+  const e = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x / 2);
+  return x >= 0 ? (1 + e) / 2 : (1 - e) / 2;
+}
+// Probabilidad de que el precio termine ≥ objetivo con un modelo log-normal y la
+// volatilidad por hora de las últimas 48 h. Es una referencia, no una certeza.
+function probModelo(ahora: number, objetivo: number, sigmaH: number, horas: number): number | null {
+  if (!(ahora > 0 && objetivo > 0 && sigmaH > 0 && horas > 0)) return null;
+  const s = sigmaH * Math.sqrt(horas);
+  return normal((Math.log(ahora / objetivo) - s * s / 2) / s);
+}
+async function volatilidades(subyacentes: string[]): Promise<Json> {
+  const out: Json = {};
+  await Promise.all(subyacentes.slice(0, 8).map(async (u) => {
+    try {
+      const velas: Json[] = await hlInfo({ type: 'candleSnapshot', req: { coin: u, interval: '1h', startTime: Date.now() - 48 * 3_600_000, endTime: Date.now() } });
+      const c = velas.map((v) => Number(v.c)).filter((x) => x > 0);
+      if (c.length < 6) return;
+      const r = c.slice(1).map((x, i) => Math.log(x / c[i]));
+      const m = r.reduce((a, b) => a + b, 0) / r.length;
+      out[u] = { sigma_h: Math.sqrt(r.reduce((a, b) => a + (b - m) ** 2, 0) / (r.length - 1)), cambio_24h_pct: c.length > 24 ? Math.round((c[c.length - 1] / c[c.length - 25] - 1) * 10000) / 100 : null };
+    } catch { /* sin velas: sin modelo */ }
+  }));
+  return out;
+}
+let mercadosMem: { ts: number; datos: Json } | null = null;
+async function prediccionMercados(): Promise<Response> {
+  if (mercadosMem && Date.now() - mercadosMem.ts < 60_000) return json({ ...mercadosMem.datos, cache: true });
+  const [meta, mids] = await Promise.all([hlInfo({ type: 'outcomeMeta' }), hlInfo({ type: 'allMids' })]);
+  const preguntas: Json = {};
+  for (const q of meta.questions || []) for (const n of [...(q.namedOutcomes || []), q.fallbackOutcome]) preguntas[n] = q;
+  const ahora = Date.now(), lista: Json[] = [];
+  for (const o of meta.outcomes || []) {
+    const c = campos(o.description), q = preguntas[o.outcome], cq = q ? campos(q.description) : {};
+    const vence = venceMs(c.expiry) ?? venceMs(cq.resolutionDeadline);
+    if (vence && vence < ahora) continue;
+    const lados = (o.sideSpecs || []).map((sd: Json, i: number) => ({ nombre: sd.name === 'Yes' ? 'Sí' : sd.name, coin: `#${o.outcome * 10 + i}`, precio: mids[`#${o.outcome * 10 + i}`] != null ? Number(mids[`#${o.outcome * 10 + i}`]) : null }));
+    if (!lados.some((l: Json) => l.precio != null)) continue;
+    const precioB = c.class === 'priceBinary';
+    let pregunta = String(o.name || '').replace(/^template:/, '');
+    if (precioB) pregunta = `¿${c.underlying} ≥ ${Number(c.targetPrice).toLocaleString('es')} al vencer?`;
+    else if (c.participant) pregunta = `¿${c.participant} gana${cq.competition ? ' ' + cq.competition : ''}?`;
+    else if (o.description && o.description !== 'other') pregunta = `${pregunta} · ${String(o.description).slice(0, 80)}`;
+    lista.push({ mercado: o.outcome, pregunta, clase: precioB ? 'precio' : c.participant ? 'deporte' : 'otro', subyacente: precioB ? c.underlying : null,
+      objetivo: precioB ? Number(c.targetPrice) : null, periodo: c.period || null, vence, lados, quote: o.quoteToken || 'USDC' });
+  }
+  const vol = await volatilidades([...new Set(lista.filter((m) => m.subyacente).map((m) => String(m.subyacente)))]);
+  for (const m of lista) {
+    if (!m.subyacente || !mids[m.subyacente]) continue;
+    m.precio_actual = Number(mids[m.subyacente]);
+    m.distancia_pct = Math.round((m.precio_actual / m.objetivo - 1) * 10000) / 100;
+    const v = vol[m.subyacente];
+    const p = v ? probModelo(m.precio_actual, m.objetivo, v.sigma_h, (m.vence - ahora) / 3_600_000) : null;
+    if (p != null) {
+      m.prob_modelo = Math.round(p * 1000) / 10;
+      // Ventaja = probabilidad del modelo − precio del mercado, para cada lado.
+      m.lados.forEach((l: Json, i: number) => { if (l.precio != null) l.ventaja = Math.round(((i === 0 ? p : 1 - p) - l.precio) * 1000) / 10; });
+    }
+  }
+  lista.sort((a, b) => (a.clase === 'precio' ? 0 : 1) - (b.clase === 'precio' ? 0 : 1) || (a.vence || 9e15) - (b.vence || 9e15));
+  const datos = { ts: ahora, mercados: lista.slice(0, 120), total: lista.length };
+  mercadosMem = { ts: ahora, datos };
+  return json(datos);
+}
+
 async function prediccionAnalizar(env: Env, c: Json): Promise<Response> {
-  const coin = String(c.coin || '');
+  // Una posición tuya («+N») o cualquier mercado abierto («mercado» + «lado»).
+  const explorar = c.mercado != null;
+  const coin = explorar ? `+${Number(c.mercado) * 10 + (Number(c.lado) ? 1 : 0)}` : String(c.coin || '');
   if (!/^\+\d+$/.test(coin)) return json({ error: 'Predicción inválida' }, 400);
   const mem = prediccionMem.get(coin);
   if (mem && Date.now() - mem.ts < 10 * 60_000) return json({ ...mem.datos, cache: true });
   const estado = await leer<Json>(env, 'estado', {});
-  const p = ((estado.ultimo?.predicciones || []) as Json[]).find((x) => x.coin === coin);
-  if (!p) return json({ error: 'Esa predicción no está en tu último ciclo: espera al próximo.' }, 404);
+  let p = ((estado.ultimo?.predicciones || []) as Json[]).find((x) => x.coin === coin);
+  if (!p && explorar) {
+    const lista: Json[] = (mercadosMem?.datos.mercados) || (await (await prediccionMercados()).json() as Json).mercados || [];
+    const m = lista.find((x) => x.mercado === Number(c.mercado));
+    if (m) p = { coin, pregunta: m.pregunta, lado_nombre: m.lados[Number(c.lado) ? 1 : 0]?.nombre, cantidad: 0, pago_si_acierta: 0, vence: m.vence, subyacente: m.subyacente, objetivo: m.objetivo, prob_modelo: m.prob_modelo };
+  }
+  if (!p) return json({ error: explorar ? 'Ese mercado ya no está abierto.' : 'Esa predicción no está en tu último ciclo: espera al próximo.' }, 404);
   if (p.vence && p.vence < Date.now()) return json({ error: 'Esta predicción ya venció: se liquida sola.' }, 409);
   // Datos frescos y públicos: probabilidad actual, precio del subyacente y sus últimas 24 h.
-  const mercado: Json = { pregunta: p.pregunta, tu_lado: p.lado_nombre, unidades: p.cantidad, pago_si_aciertas: p.pago_si_acierta,
+  const mercado: Json = { pregunta: p.pregunta, tu_lado: p.lado_nombre, unidades: p.cantidad, pago_si_aciertas: p.pago_si_acierta, tiene_posicion: (p.cantidad || 0) > 0,
+    prob_modelo_estadistico_si_pct: p.prob_modelo ?? null,
     horas_para_vencer: p.vence ? Math.round((p.vence - Date.now()) / 360_000) / 10 : null };
   try {
     const mids: Json = await hlInfo({ type: 'allMids' });
@@ -528,9 +636,10 @@ async function prediccionAnalizar(env: Env, c: Json): Promise<Response> {
   const t0 = Date.now();
   const { datos: d, modelo } = await iaChat(env, [
     { role: 'system', content: 'Eres un analista prudente de mercados de predicción. Explicas a un principiante en español sencillo. No prometes resultados. Respondes SOLO JSON válido.' },
-    { role: 'user', content: `El usuario tiene esta posición en un mercado de predicción de Hyperliquid (cada unidad paga 1 si acierta y 0 si no; el precio es la probabilidad que le da el mercado):\n${JSON.stringify(mercado)}\nAnaliza si su lado tiene buenas probabilidades comparando el precio actual con el objetivo, el tiempo que queda y cuánto se mueve el precio. Compara tu probabilidad con la del mercado. Sugiere UNA acción: MANTENER (esperar al vencimiento), VENDER (cerrar ahora al precio del mercado) o COMPRAR MÁS.\nFormato: {"sugerencia":"MANTENER|VENDER|COMPRAR MÁS","confianza":0-100,"prob_estimada":0-100,"analisis":"2-4 frases","riesgos":["..."]}` },
+    { role: 'user', content: `El usuario tiene esta posición en un mercado de predicción de Hyperliquid (cada unidad paga 1 si acierta y 0 si no; el precio es la probabilidad que le da el mercado):\n${JSON.stringify(mercado)}\nAnaliza si su lado tiene buenas probabilidades comparando el precio actual con el objetivo, el tiempo que queda y cuánto se mueve el precio. Compara tu probabilidad con la del mercado. ${mercado.tiene_posicion ? 'Sugiere UNA acción: MANTENER (esperar al vencimiento), VENDER (cerrar ahora al precio del mercado) o COMPRAR MÁS.' : 'El usuario aún NO tiene posición en este lado: sugiere COMPRAR (entrar en este lado) o NO ENTRAR.'}\nFormato: {"sugerencia":"MANTENER|VENDER|COMPRAR MÁS|COMPRAR|NO ENTRAR","confianza":0-100,"prob_estimada":0-100,"analisis":"2-4 frases","riesgos":["..."]}` },
   ]);
-  const sug = ['MANTENER', 'VENDER', 'COMPRAR MÁS'].includes(String(d.sugerencia).toUpperCase()) ? String(d.sugerencia).toUpperCase() : 'MANTENER';
+  const validas = mercado.tiene_posicion ? ['MANTENER', 'VENDER', 'COMPRAR MÁS'] : ['COMPRAR', 'NO ENTRAR'];
+  const sug = validas.includes(String(d.sugerencia).toUpperCase()) ? String(d.sugerencia).toUpperCase() : validas[0] === 'MANTENER' ? 'MANTENER' : 'NO ENTRAR';
   const datos = {
     coin, modelo, mercado, sugerencia: sug,
     confianza: Math.max(0, Math.min(100, Number(d.confianza) || 0)),
@@ -638,6 +747,8 @@ async function api(req: Request, env: Env, ruta: string, url: URL): Promise<Resp
       return ordenesApi(env, cuerpo);
     case 'GET /api/historial':
       return json({ items: await leer<Json[]>(env, 'bitacora', []) });
+    case 'GET /api/predicciones/mercados':
+      return prediccionMercados().catch((e) => json({ error: `Hyperliquid no respondió: ${String(e?.message || e).slice(0, 120)}` }, 502));
     case 'POST /api/predicciones/analizar':
       return prediccionAnalizar(env, cuerpo).catch(async (e) => {
         await bitacora(env, [{ ts: Date.now(), tipo: 'ia', ok: false, texto: `IA (predicción) falló: ${String(e?.message || e).slice(0, 160)}` }]);

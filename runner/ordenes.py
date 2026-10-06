@@ -17,9 +17,36 @@ def _cantidad_venta(o, saldos):
     return saldos.get(o["simbolo"], 0.0) * pct / 100
 
 
+def ejecutar_prediccion(ex, o, simulado):
+    """Órdenes en mercados de predicción de Hyperliquid (solo en dinero real)."""
+    upd = {"id": o["id"]}
+    if simulado:
+        return {**upd, "estado": "error", "error": "Las predicciones solo se operan en dinero real"}, None
+    if not hasattr(ex, "orden_prediccion"):
+        return {**upd, "estado": "error", "error": "Tu exchange no tiene mercados de predicción"}, None
+    try:
+        cod, unidades, lim = int(str(o["coin"]).lstrip("#")), int(o["unidades"]), float(o["limite"])
+    except (KeyError, TypeError, ValueError):
+        return {**upd, "estado": "error", "error": "Orden de predicción incompleta"}, None
+    compra = o["accion"] == "COMPRAR"
+    try:
+        r = ex.orden_prediccion(cod, compra, unidades, lim)
+    except ErrorExchange as e:
+        return {**upd, "estado": "error", "error": str(e)[:200]}, None
+    if r["cantidad"] <= 0:
+        return {**upd, "estado": "error", "error": f"No se llenó: nadie {'vendía' if compra else 'compraba'} a {lim:g} o mejor. Ajusta el límite y vuelve a intentar."}, None
+    etiqueta = o.get("etiqueta") or o["coin"]
+    op = {"ts": int(time.time()), "simbolo": etiqueta, "accion": o["accion"], "cantidad": r["cantidad"], "precio": r["precio"],
+          "total": round(r["total"], 2), "motivo": f"Predicción {etiqueta}", "simulada": False, "pnl": None, "orden": o["id"], "prediccion": o["coin"]}
+    nota = f"Se llenaron {r['cantidad']:g} de {unidades}" if r["cantidad"] < unidades else None
+    return {**upd, "estado": "ejecutada", "nota": nota, "resultado": {"precio": r["precio"], "cantidad": r["cantidad"], "total": round(r["total"], 2), "ts": int(time.time() * 1000)}}, op
+
+
 def ejecutar(ex, o, saldos, precios, costos, cfg, simulado):
     """Intenta ejecutar una orden aprobada. Devuelve (actualizacion, operacion|None).
     Si aún no se cumple su condición, la orden sigue «aprobada» con una nota."""
+    if o.get("tipo") == "prediccion":
+        return ejecutar_prediccion(ex, o, simulado)
     sym, acc = o["simbolo"], o["accion"]
     upd = {"id": o["id"]}
     precio = precios.get(sym)

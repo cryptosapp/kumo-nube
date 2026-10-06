@@ -154,6 +154,35 @@ class CcxtExchange:
             return 0.0
         return _f((b.get("total") or {}).get("USDC"))
 
+    def orden_prediccion(self, cod, comprar, unidades, limite):
+        """Hyperliquid HIP-4: compra o vende `unidades` del lado «#cod» a `limite` o mejor.
+        Es IOC (se llena ya lo que se pueda; lo demás se cancela): nunca queda una orden
+        olvidada en el libro. ccxt no conoce estos mercados, así que la acción se arma y
+        firma aquí con la API wallet (activo = 100 000 000 + cod)."""
+        if self.id != "hyperliquid" or not self.con_claves:
+            raise ErrorExchange("Las predicciones solo se operan en Hyperliquid con tus claves")
+        if not (0.001 <= limite <= 0.999) or int(unidades) < 1:
+            raise ErrorExchange("Precio límite entre 0.001 y 0.999 y al menos 1 unidad")
+        px = f"{limite:.4f}".rstrip("0").rstrip(".")
+        accion = {"type": "order", "orders": [{"a": 100_000_000 + int(cod), "b": bool(comprar), "p": px, "s": str(int(unidades)),
+                                               "r": False, "t": {"limit": {"tif": "Ioc"}}}], "grouping": "na"}
+        nonce = self.ex.milliseconds()
+        try:
+            firma = self.ex.sign_l1_action(accion, nonce)
+            resp = self.ex.private_post_exchange({"action": accion, "nonce": nonce, "signature": firma})
+        except ccxt.BaseError as e:
+            raise ErrorExchange(_explicar(self.id, e))
+        if not isinstance(resp, dict) or resp.get("status") != "ok":
+            raise ErrorExchange(f"Hyperliquid: {str((resp or {}).get('response') if isinstance(resp, dict) else resp)[:200]}")
+        estado = (((resp.get("response") or {}).get("data") or {}).get("statuses") or [{}])[0]
+        if isinstance(estado, dict) and estado.get("error"):
+            raise ErrorExchange(f"Hyperliquid: {estado['error'][:200]}")
+        lleno = estado.get("filled") if isinstance(estado, dict) else None
+        if not lleno:
+            return {"cantidad": 0.0, "precio": 0.0, "total": 0.0, "id": None}
+        cant, precio = _f(lleno.get("totalSz")), _f(lleno.get("avgPx"))
+        return {"cantidad": cant, "precio": precio, "total": round(cant * precio, 4), "id": lleno.get("oid")}
+
     def precios(self, simbolos):
         pares = [self._par(s) for s in simbolos if s.upper() != self.quote and self.existe(s)]
         out = {}

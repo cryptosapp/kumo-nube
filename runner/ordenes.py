@@ -34,7 +34,13 @@ def ejecutar_prediccion(ex, o, simulado):
     except ErrorExchange as e:
         return {**upd, "estado": "error", "error": str(e)[:200]}, None
     if r["cantidad"] <= 0:
-        return {**upd, "estado": "error", "error": f"No se llenó: nadie {'vendía' if compra else 'compraba'} a {lim:g} o mejor. Ajusta el límite y vuelve a intentar."}, None
+        mejor = r.get("mejor")
+        if mejor and mejor.get("precio"):
+            pista = (f" El más barato vendía a {mejor['precio']:g} ({mejor['unidades']:g} u.): reintenta con límite {mejor['precio']:g} o más." if compra
+                     else f" El mejor comprador pagaba {mejor['precio']:g} ({mejor['unidades']:g} u.): reintenta con límite {mejor['precio']:g} o menos.")
+        else:
+            pista = f" No había {'vendedores' if compra else 'compradores'} en el libro: prueba más tarde."
+        return {**upd, "estado": "error", "error": f"No se llenó: nadie {'vendía' if compra else 'compraba'} a {lim:g} o mejor. No se movió nada.{pista}", "mejor": mejor}, None
     etiqueta = o.get("etiqueta") or o["coin"]
     op = {"ts": int(time.time()), "simbolo": etiqueta, "accion": o["accion"], "cantidad": r["cantidad"], "precio": r["precio"],
           "total": round(r["total"], 2), "motivo": f"Predicción {etiqueta}", "simulada": False, "pnl": None, "orden": o["id"], "prediccion": o["coin"]}

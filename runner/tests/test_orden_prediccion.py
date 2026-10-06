@@ -55,6 +55,35 @@ class OrdenPrediccion(unittest.TestCase):
         with self.assertRaises(ErrorExchange):
             ex.orden_prediccion(90151, True, 1, 1.2)
 
+    def test_tu_error_no_se_lleno_explica_el_mejor_precio(self):
+        import ccxt
+        ex = CcxtExchange("hyperliquid", "USDC", "0x" + "0" * 39 + "1", "0x" + "11" * 32)
+        msg = 'hyperliquid {"status":"ok","response":{"type":"order","data":{"statuses":[{"error":"Order could not immediately match against any resting orders. asset=100090170"}]}}}'
+        def falla(req):
+            raise ccxt.ExchangeError(msg)
+        ex.ex.private_post_exchange = falla
+        ex._info_hl = lambda c: {"levels": [[{"px": "0.81001", "sz": "15.0"}], [{"px": "0.86033", "sz": "40.0"}]]}
+        o = dict(ORD, coin="#90170", accion="VENDER", unidades=2, limite=0.827)
+        upd, op = O.ejecutar(ex, o, {}, {}, {}, {"quote": "USDC"}, False)
+        self.assertEqual((upd["estado"], op), ("error", None))
+        self.assertNotIn("hyperliquid {", upd["error"])
+        self.assertIn("nadie compraba a 0.827", upd["error"])
+        self.assertIn("El mejor comprador pagaba 0.81001 (15 u.)", upd["error"])
+        self.assertEqual(upd["mejor"], {"precio": 0.81001, "unidades": 15.0})
+        # Comprando, la pista es el vendedor más barato.
+        upd, _ = O.ejecutar(ex, dict(o, accion="COMPRAR", limite=0.8), {}, {}, {}, {"quote": "USDC"}, False)
+        self.assertIn("El más barato vendía a 0.86033", upd["error"])
+
+    def test_otro_error_de_hyperliquid_legible(self):
+        import ccxt
+        ex = CcxtExchange("hyperliquid", "USDC", "0x" + "0" * 39 + "1", "0x" + "11" * 32)
+        def falla(req):
+            raise ccxt.ExchangeError('hyperliquid {"status":"ok","response":{"type":"order","data":{"statuses":[{"error":"Insufficient spot balance asset=100090170"}]}}}')
+        ex.ex.private_post_exchange = falla
+        with self.assertRaises(ErrorExchange) as c:
+            ex.orden_prediccion(90170, False, 2, 0.8)
+        self.assertEqual(str(c.exception), "Hyperliquid: Insufficient spot balance asset=100090170")
+
     def test_ciclo_no_busca_precio_de_predicciones(self):
         from tests.test_ciclo_ordenes import Pub
         remoto = {"config": {"quote": "USDC", "objetivo": {}, "ia": "off"}, "estado_runner": {"cartera_sim": {"USDC": 100}}, "ordenes": [dict(ORD, estado="aprobada")]}

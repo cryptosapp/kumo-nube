@@ -154,6 +154,15 @@ class CcxtExchange:
             return 0.0
         return _f((b.get("total") or {}).get("USDC"))
 
+    def mejor_precio_prediccion(self, cod, comprar):
+        """Mejor precio contrario en el libro: quien vende (si compras) o quien compra (si vendes)."""
+        try:
+            niveles = self._info_hl({"type": "l2Book", "coin": f"#{int(cod)}"}).get("levels") or [[], []]
+            lado = niveles[1] if comprar else niveles[0]
+            return {"precio": _f(lado[0]["px"]), "unidades": _f(lado[0]["sz"])} if lado else None
+        except Exception:
+            return None
+
     def orden_prediccion(self, cod, comprar, unidades, limite):
         """Hyperliquid HIP-4: compra o vende `unidades` del lado «#cod» a `limite` o mejor.
         Es IOC (se llena ya lo que se pueda; lo demás se cancela): nunca queda una orden
@@ -163,7 +172,7 @@ class CcxtExchange:
             raise ErrorExchange("Las predicciones solo se operan en Hyperliquid con tus claves")
         if not (0.001 <= limite <= 0.999) or int(unidades) < 1:
             raise ErrorExchange("Precio límite entre 0.001 y 0.999 y al menos 1 unidad")
-        px = f"{limite:.4f}".rstrip("0").rstrip(".")
+        px = f"{limite:.5g}"  # Hyperliquid acepta hasta 5 cifras significativas (p. ej. 0.81001)
         accion = {"type": "order", "orders": [{"a": 100_000_000 + int(cod), "b": bool(comprar), "p": px, "s": str(int(unidades)),
                                                "r": False, "t": {"limit": {"tif": "Ioc"}}}], "grouping": "na"}
         nonce = self.ex.milliseconds()
@@ -171,15 +180,22 @@ class CcxtExchange:
             firma = self.ex.sign_l1_action(accion, nonce)
             resp = self.ex.private_post_exchange({"action": accion, "nonce": nonce, "signature": firma})
         except ccxt.BaseError as e:
-            raise ErrorExchange(_explicar(self.id, e))
+            # ccxt convierte los errores de Hyperliquid en excepción con el JSON dentro.
+            m = re.search(r'"error":\s*"([^"]+)"', str(e)) or re.search(r'"response":\s*"([^"]+)"', str(e))
+            texto = m.group(1) if m else str(e)
+            if "could not immediately match" in texto:
+                return {"cantidad": 0.0, "precio": 0.0, "total": 0.0, "id": None, "mejor": self.mejor_precio_prediccion(cod, comprar)}
+            raise ErrorExchange(f"Hyperliquid: {texto[:200]}")
         if not isinstance(resp, dict) or resp.get("status") != "ok":
             raise ErrorExchange(f"Hyperliquid: {str((resp or {}).get('response') if isinstance(resp, dict) else resp)[:200]}")
         estado = (((resp.get("response") or {}).get("data") or {}).get("statuses") or [{}])[0]
         if isinstance(estado, dict) and estado.get("error"):
+            if "could not immediately match" in estado["error"]:
+                return {"cantidad": 0.0, "precio": 0.0, "total": 0.0, "id": None, "mejor": self.mejor_precio_prediccion(cod, comprar)}
             raise ErrorExchange(f"Hyperliquid: {estado['error'][:200]}")
         lleno = estado.get("filled") if isinstance(estado, dict) else None
         if not lleno:
-            return {"cantidad": 0.0, "precio": 0.0, "total": 0.0, "id": None}
+            return {"cantidad": 0.0, "precio": 0.0, "total": 0.0, "id": None, "mejor": self.mejor_precio_prediccion(cod, comprar)}
         cant, precio = _f(lleno.get("totalSz")), _f(lleno.get("avgPx"))
         return {"cantidad": cant, "precio": precio, "total": round(cant * precio, 4), "id": lleno.get("oid")}
 

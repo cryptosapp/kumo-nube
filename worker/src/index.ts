@@ -206,7 +206,7 @@ function limpiarPrediccion(base: Json, c: Json, config: Json): { orden?: Json; e
   if (!(Number.isInteger(u) && u >= 1 && u <= 100000)) return { error: 'Unidades: número entero desde 1' };
   const l = Number(c.limite ?? o.limite);
   if (!(l >= 0.001 && l <= 0.999)) return { error: 'El precio límite va de 0.001 a 0.999' };
-  o.unidades = u; o.limite = Math.round(l * 10000) / 10000; o.simbolo = o.coin;
+  o.unidades = u; o.limite = Number(l.toPrecision(5)); o.simbolo = o.coin;
   if (c.etiqueta !== undefined) o.etiqueta = String(c.etiqueta).slice(0, 90);
   if (c.razon !== undefined) o.razon = String(c.razon).slice(0, 240);
   o.quote = config.quote; delete o.monto; delete o.pct;
@@ -551,6 +551,16 @@ async function volatilidades(subyacentes: string[]): Promise<Json> {
   }));
   return out;
 }
+// Mejor comprador y mejor vendedor ahora (libro público de Hyperliquid).
+async function prediccionLibro(url: URL): Promise<Response> {
+  const coin = String(url.searchParams.get('coin') || '');
+  if (!/^#\d{2,9}$/.test(coin)) return json({ error: 'Mercado inválido' }, 400);
+  const d: Json = await hlInfo({ type: 'l2Book', coin });
+  const [compras, ventas] = d.levels || [[], []];
+  const nivel = (x: Json | undefined) => (x ? { precio: Number(x.px), unidades: Number(x.sz) } : null);
+  return json({ coin, ts: Date.now(), mejor_compra: nivel(compras[0]), mejor_venta: nivel(ventas[0]),
+    compras: compras.slice(0, 5).map(nivel), ventas: ventas.slice(0, 5).map(nivel) });
+}
 let mercadosMem: { ts: number; datos: Json } | null = null;
 async function prediccionMercados(): Promise<Response> {
   if (mercadosMem && Date.now() - mercadosMem.ts < 60_000) return json({ ...mercadosMem.datos, cache: true });
@@ -749,6 +759,8 @@ async function api(req: Request, env: Env, ruta: string, url: URL): Promise<Resp
       return json({ items: await leer<Json[]>(env, 'bitacora', []) });
     case 'GET /api/predicciones/mercados':
       return prediccionMercados().catch((e) => json({ error: `Hyperliquid no respondió: ${String(e?.message || e).slice(0, 120)}` }, 502));
+    case 'GET /api/predicciones/libro':
+      return prediccionLibro(url).catch((e) => json({ error: `Hyperliquid no respondió: ${String(e?.message || e).slice(0, 120)}` }, 502));
     case 'POST /api/predicciones/analizar':
       return prediccionAnalizar(env, cuerpo).catch(async (e) => {
         await bitacora(env, [{ ts: Date.now(), tipo: 'ia', ok: false, texto: `IA (predicción) falló: ${String(e?.message || e).slice(0, 160)}` }]);

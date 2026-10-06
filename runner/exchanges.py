@@ -4,6 +4,7 @@ Todos exponen la misma interfaz mínima:
     saldos() -> {ACTIVO: cantidad}
     precios(simbolos) -> {SIMBOLO: precio en la moneda base (quote)}
     velas(simbolo, marco, n) -> [cierres]
+    velas_ts(simbolo, marco, n) -> [(ms, cierre)]
     mercados_top(n) -> [{simbolo, precio, cambio_24h, volumen}]
     comprar(simbolo, monto_quote) -> {cantidad, precio, total}
     vender(simbolo, cantidad) -> {cantidad, precio, total}
@@ -168,11 +169,15 @@ class CcxtExchange:
         return out
 
     def velas(self, simbolo, marco="1h", n=100):
+        return [c for _, c in self.velas_ts(simbolo, marco, n)]
+
+    def velas_ts(self, simbolo, marco="1h", n=100):
+        """[(ms_apertura, cierre)] de las últimas n velas."""
         try:
             datos = self.ex.fetch_ohlcv(self._par(simbolo), marco, limit=n)
         except ccxt.BaseError as e:
             raise ErrorExchange(_explicar(self.id, e))
-        return [_f(v[4]) for v in datos if v and _f(v[4]) > 0]
+        return [(int(v[0]), _f(v[4])) for v in datos if v and _f(v[4]) > 0]
 
     def mercados_top(self, n=20):
         try:
@@ -311,6 +316,9 @@ class CryptoComApp:
     def velas(self, simbolo, marco="1h", n=100):
         return self.publico.velas(simbolo, marco, n)
 
+    def velas_ts(self, simbolo, marco="1h", n=100):
+        return self.publico.velas_ts(simbolo, marco, n)
+
     def mercados_top(self, n=20):
         return self.publico.mercados_top(n)
 
@@ -364,6 +372,9 @@ class Simulador:
 
     def velas(self, simbolo, marco="1h", n=100):
         return self.base.velas(simbolo, marco, n)
+
+    def velas_ts(self, simbolo, marco="1h", n=100):
+        return self.base.velas_ts(simbolo, marco, n)
 
     def mercados_top(self, n=20):
         return self.base.mercados_top(n)

@@ -41,11 +41,40 @@ def http(metodo, url, token, cuerpo=None):
         return json.loads(r.read().decode() or "{}")
 
 
-def indicadores(ex, simbolos, marco):
+MARCOS_GRAFICA = ("1h", "4h", "1d")
+MAX_GRAFICAS = 8
+
+
+def _sig(x):
+    """Redondea a 6 cifras significativas para que las gráficas pesen poco en la nube."""
+    return float(f"{x:.6g}")
+
+
+def graficas(ex, simbolos, cache):
+    """Velas de 1h, 4h y 1d de tus activos para las gráficas de la app.
+    {SIM: {marco: {"t": [ms…], "c": [cierres…]}}}. Lo que se lee queda en `cache`
+    para que los indicadores no vuelvan a pedir las mismas velas."""
+    out = {}
+    for s in simbolos[:MAX_GRAFICAS]:
+        g = {}
+        for m in MARCOS_GRAFICA:
+            try:
+                v = ex.velas_ts(s, m, 100)
+            except (ErrorExchange, AttributeError):
+                continue
+            cache[(s, m)] = [c for _, c in v]
+            if len(v) >= 2:
+                g[m] = {"t": [t for t, _ in v], "c": [_sig(c) for _, c in v]}
+        if g:
+            out[s] = g
+    return out
+
+
+def indicadores(ex, simbolos, marco, cache=None):
     out = {}
     for s in simbolos:
         try:
-            cierres = ex.velas(s, marco, 100)
+            cierres = (cache or {}).get((s, marco)) or ex.velas(s, marco, 100)
         except ErrorExchange:
             continue
         if len(cierres) > 20:
@@ -55,6 +84,7 @@ def indicadores(ex, simbolos, marco):
 
 def ciclo(remoto):
     cfg = {**E.CONFIG_DEFECTO, **(remoto.get("config") or {})}
+    ia.PREFERIDO = remoto.get("ia_pref") or None
     estado = remoto.get("estado_runner") or {}
     quote = cfg["quote"].upper()
     exchange_id = os.getenv("EXCHANGE_ID", "kraken").strip().lower() or "kraken"
@@ -90,7 +120,15 @@ def ciclo(remoto):
     sin_par = [s for s in tenidos if s not in precios]
     if sin_par:
         notas.append("Sin par " + quote + " para: " + ", ".join(sin_par[:8]))
-    ind = indicadores(ex, [s for s in simbolos if s in precios], cfg["marco"])
+    # Gráficas primero: tus activos y luego el reparto objetivo y las órdenes pendientes.
+    cache = {}
+    orden_g = [s for s in tenidos if s in precios] + [s for s in simbolos if s in precios and s not in tenidos]
+    try:
+        graf = graficas(ex, orden_g, cache)
+    except Exception as e:  # las gráficas nunca deben tumbar el ciclo
+        graf = {}
+        notas.append(f"Gráficas: {type(e).__name__}")
+    ind = indicadores(ex, [s for s in simbolos if s in precios], cfg["marco"], cache)
 
     costos = E.actualizar_costos(estado.get("costos") or {}, saldos, precios)
 
@@ -185,6 +223,7 @@ def ciclo(remoto):
         "radar": radar, "real": real,
         "ordenes_upd": ordenes_upd, "ordenes_nuevas": nuevas, "ia_log": ia.LOG[-20:],
         "ordenes": ordenes_ia(propuestas, bloqueadas, ejecutadas, fallidas, cfg["pausado"], opiniones),
+        "graficas": graf,
     }
 
 

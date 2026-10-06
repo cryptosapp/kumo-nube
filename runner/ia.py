@@ -16,16 +16,27 @@ GROQ_URL = "https://api.groq.com/openai/v1"
 GROQ_MODELOS = ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "llama-3.3-70b-versatile"]
 
 
+# Modelo que respondió en la última prueba de la app (Config → semáforo). Se
+# prueba primero; los demás quedan de respaldo en su orden.
+PREFERIDO = None
+
+
+def _ordenar(modelos):
+    if PREFERIDO and PREFERIDO in modelos:
+        return [PREFERIDO] + [m for m in modelos if m != PREFERIDO]
+    return modelos
+
+
 def proveedor():
     """Devuelve (url_base, clave, [modelos], nombre) o None si no hay IA configurada."""
     url = os.getenv("IA_URL", "").strip().rstrip("/")
     if url:
         modelos = [m.strip() for m in os.getenv("IA_MODELOS", "").split(",") if m.strip()]
         nombre = re.sub(r"^https?://(api\.)?", "", url).split("/")[0]
-        return url, os.getenv("IA_CLAVE", "").strip(), modelos, nombre
+        return url, os.getenv("IA_CLAVE", "").strip(), _ordenar(modelos), nombre
     clave = os.getenv("GROQ_API_KEY", "").strip()
     if clave:
-        return GROQ_URL, clave, [m for m in [os.getenv("GROQ_MODEL")] + GROQ_MODELOS if m], "groq.com"
+        return GROQ_URL, clave, _ordenar([m for m in [os.getenv("GROQ_MODEL")] + GROQ_MODELOS if m]), "groq.com"
     return None
 
 

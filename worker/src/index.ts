@@ -344,7 +344,7 @@ async function runnerReporte(env: Env, r: Json): Promise<Response> {
   const serie = r.ok ? `${r.exchange}|${r.modo}` : estado.serie;
   if (r.ok && estado.serie !== serie) historial = [];
   if (r.ok && typeof r.total === 'number') historial.push([ahora, r.total]);
-  const { radar, cartera_sim, costos, ...ultimo } = r;
+  const { radar, cartera_sim, costos, graficas, ...ultimo } = r;
   const nuevo: Json = {
     ciclo, actualizado: ahora, serie, ultimo: { ...ultimo, ts: ahora },
     historial: historial.slice(-500),
@@ -353,6 +353,11 @@ async function runnerReporte(env: Env, r: Json): Promise<Response> {
     radar_ts: Array.isArray(radar) && radar.length ? ahora : estado.radar_ts || null,
   };
   await env.KUMO.put('estado', JSON.stringify(nuevo));
+  // Velas de tus activos para las gráficas de la app: una escritura por ciclo,
+  // aparte del estado para que el Panel no tenga que descargarlas.
+  if (r.ok && graficas && typeof graficas === 'object' && Object.keys(graficas).length) {
+    await env.KUMO.put('graficas', JSON.stringify({ ts: ahora, exchange: r.exchange, quote: r.quote, datos: graficas }));
+  }
 
   await guardarSenales(env, ciclo, ahora, r);
   await mezclarOrdenes(env, ahora, r);
@@ -379,7 +384,8 @@ async function runnerReporte(env: Env, r: Json): Promise<Response> {
 async function runnerConfig(env: Env): Promise<Response> {
   const [config, estado] = await Promise.all([leerConfig(env), leer<Json>(env, 'estado', {})]);
   const ordenes = (await leerOrdenes(env)).filter((o) => o.estado === 'propuesta' || o.estado === 'aprobada');
-  return json({ config, estado_runner: estado.runner || {}, ordenes });
+  const ia_pref = await env.KUMO.get('ia_pref');
+  return json({ config, estado_runner: estado.runner || {}, ordenes, ia_pref });
 }
 
 // ---------------------------------------------------------------- IA radar
@@ -407,10 +413,17 @@ function extraerJson(texto: string): Json {
   }
 }
 
-async function iaChat(env: Env, mensajes: Json[]): Promise<{ datos: Json; modelo: string }> {
+// Modelo que respondió en la última prueba del semáforo: se prueba primero.
+async function modelosOrdenados(env: Env, modelos: string[]): Promise<string[]> {
+  const pref = await env.KUMO.get('ia_pref');
+  return pref && modelos.includes(pref) ? [pref, ...modelos.filter((m) => m !== pref)] : modelos;
+}
+
+async function iaChat(env: Env, mensajes: Json[], soloModelos?: string[]): Promise<{ datos: Json; modelo: string }> {
   const p = proveedorIA(env);
   if (!p) throw new Error('Tu nube no tiene IA configurada: elige un proveedor en Config → Cambiar claves');
   if (!p.modelos.length) throw new Error(`Falta IA_MODELOS para ${p.nombre}`);
+  p.modelos = soloModelos || await modelosOrdenados(env, p.modelos);
   const cab: Record<string, string> = { 'Content-Type': 'application/json', 'User-Agent': 'kumo-bot/1.0' };
   if (p.clave) cab.Authorization = `Bearer ${p.clave}`;
   let ultimo = '';
@@ -469,6 +482,85 @@ async function radarAnalizar(env: Env, cuerpo: Json): Promise<Response> {
   return json(datos);
 }
 
+// ---------------------------------------------------------------- Gráficas
+// Las velas las lee el runner de TU exchange en cada ciclo (1h, 4h y 1d).
+async function graficasApi(env: Env, url: URL): Promise<Response> {
+  const sym = limpiarSimbolo(url.searchParams.get('simbolo'));
+  const g = await leer<Json>(env, 'graficas', {});
+  const datos: Json = g.datos || {};
+  if (!sym) return json({ ts: g.ts || null, simbolos: Object.keys(datos) });
+  if (!datos[sym]) return json({ error: `${sym} aún no tiene gráfica: aparece en el próximo ciclo si está en tu cartera o en tu reparto.`, pendiente: true, simbolos: Object.keys(datos) }, 404);
+  return json({ simbolo: sym, ts: g.ts, exchange: g.exchange, quote: g.quote, marcos: datos[sym] });
+}
+
+// ---------------------------------------------------------------- Semáforo
+// Lo que la nube sabe de sí misma; la app le suma la latencia y GitHub Actions.
+async function semaforo(env: Env): Promise<Response> {
+  const [estado, config, log] = await Promise.all([leer<Json>(env, 'estado', {}), leerConfig(env), leer<Json[]>(env, 'bitacora', [])]);
+  const u: Json = estado.ultimo || {};
+  const ia = log.filter((l) => l.tipo === 'ia' && l.modelo).slice(0, 6);
+  const p = proveedorIA(env);
+  return json({
+    version: env.KUMO_VERSION || '1.0.0', ahora: Date.now(),
+    ciclo: estado.ciclo || 0, actualizado: estado.actualizado || null, ok: u.ok !== false && !!estado.ciclo,
+    errores: u.errores || [], exchange: u.exchange || null, modo: config.modo, pausado: !!config.pausado,
+    real: u.real ? { error: u.real.error || null, libre: u.real.libre ?? null } : null, libre: u.libre ?? null,
+    monto_min: config.monto_min, quote: config.quote, objetivo: config.objetivo,
+    ia: { modo: config.ia, proveedor: p?.nombre || null, modelos: p?.modelos || [], preferido: await env.KUMO.get('ia_pref'), ultimas: ia },
+  });
+}
+
+// Prueba la IA con una pregunta mínima. Con `todos` prueba cada modelo y deja
+// como preferido el primero que responde (así el bot deja de perder tiempo con
+// modelos caídos). Solo escribe en KV si el preferido cambia.
+async function iaProbar(env: Env, c: Json): Promise<Response> {
+  const p = proveedorIA(env);
+  if (!p) return json({ ok: false, codigo: 'sin_ia', error: 'Tu nube no tiene IA configurada' });
+  if (!p.modelos.length) return json({ ok: false, codigo: 'sin_modelos', error: `Falta IA_MODELOS para ${p.nombre}` });
+  const mensajes = [{ role: 'system', content: 'Respondes SOLO JSON.' }, { role: 'user', content: 'Responde exactamente {"ok":true}' }];
+  const lista = (await modelosOrdenados(env, p.modelos)).slice(0, c.todos ? 5 : 3);
+  const pruebas: Json[] = [];
+  for (const m of lista) {
+    const t0 = Date.now();
+    try {
+      await iaChat(env, mensajes, [m]);
+      pruebas.push({ modelo: m, ok: true, ms: Date.now() - t0 });
+      if (!c.todos) break;
+    } catch (e: any) {
+      const error = String(e?.message || e).slice(0, 160);
+      pruebas.push({ modelo: m, ok: false, ms: Date.now() - t0, error });
+      if (/rechazó la clave/.test(error)) break;
+    }
+  }
+  const bueno = pruebas.find((x) => x.ok);
+  const previo = await env.KUMO.get('ia_pref');
+  let cambio = null;
+  if (bueno && bueno.modelo !== (previo || p.modelos[0])) {
+    await env.KUMO.put('ia_pref', bueno.modelo);
+    cambio = bueno.modelo;
+    await bitacora(env, [{ ts: Date.now(), tipo: 'ia', ok: true, texto: `Autocorrección: ${bueno.modelo} queda como modelo principal (respondió en ${(bueno.ms / 1000).toFixed(1)} s)` }]);
+  }
+  const clave = pruebas.some((x) => /rechazó la clave/.test(x.error || ''));
+  return json({ ok: !!bueno, proveedor: p.nombre, modelo: bueno?.modelo || null, ms: bueno?.ms ?? null, pruebas, preferido_nuevo: cambio,
+    codigo: bueno ? 'ok' : clave ? 'clave' : 'caida', error: bueno ? null : pruebas[pruebas.length - 1]?.error || 'La IA no respondió' });
+}
+
+// La IA lee el diagnóstico de la app y elige arreglos SOLO de la lista que la
+// app le ofrece (nunca inventa acciones ni toca montos o el modo real).
+async function iaDiagnosticar(env: Env, c: Json): Promise<Response> {
+  const hallazgos = (Array.isArray(c.hallazgos) ? c.hallazgos : []).slice(0, 12).map((h: Json) => ({ id: String(h.id).slice(0, 30), estado: String(h.estado).slice(0, 10), detalle: String(h.detalle || '').slice(0, 300) }));
+  const arreglos = (Array.isArray(c.arreglos) ? c.arreglos : []).slice(0, 10).map((a: Json) => ({ id: String(a.id).slice(0, 40), texto: String(a.texto || '').slice(0, 200) }));
+  const t0 = Date.now();
+  const { datos: d, modelo } = await iaChat(env, [
+    { role: 'system', content: 'Eres el técnico de soporte de Kumo Bot (bot de trading en GitHub Actions + Cloudflare Worker). Explicas en español sencillo a un principiante. Respondes SOLO JSON válido.' },
+    { role: 'user', content: `Diagnóstico automático:\n${JSON.stringify(hallazgos)}\nArreglos disponibles (elige solo ids de esta lista, los que de verdad resuelvan algo):\n${JSON.stringify(arreglos)}\nFormato: {"resumen":"1-3 frases: qué falla y por qué","pasos":["pasos que debe hacer el usuario si algo no se arregla solo"],"arreglos":["id",...]}` },
+  ]);
+  const validos = new Set(arreglos.map((a: Json) => a.id));
+  const elegidos = (Array.isArray(d.arreglos) ? d.arreglos : []).map(String).filter((x: string) => validos.has(x));
+  await bitacora(env, [{ ts: Date.now(), tipo: 'ia', ok: true, modelo, ms: Date.now() - t0, texto: `IA (diagnóstico) respondió con ${modelo}: ${elegidos.length ? 'arreglos ' + elegidos.join(', ') : 'sin arreglos automáticos'}` }]);
+  return json({ modelo, resumen: String(d.resumen || '').slice(0, 600), pasos: (Array.isArray(d.pasos) ? d.pasos : []).slice(0, 6).map((x: unknown) => String(x).slice(0, 240)), arreglos: [...new Set(elegidos)] });
+}
+
 // ---------------------------------------------------------------- API app
 async function api(req: Request, env: Env, ruta: string, url: URL): Promise<Response> {
   const cuerpo: Json = req.method === 'POST' ? ((await req.json().catch(() => ({}))) as Json) : {};
@@ -484,6 +576,14 @@ async function api(req: Request, env: Env, ruta: string, url: URL): Promise<Resp
       return ordenesApi(env, cuerpo);
     case 'GET /api/historial':
       return json({ items: await leer<Json[]>(env, 'bitacora', []) });
+    case 'GET /api/graficas':
+      return graficasApi(env, url);
+    case 'GET /api/semaforo':
+      return semaforo(env);
+    case 'POST /api/ia/probar':
+      return iaProbar(env, cuerpo);
+    case 'POST /api/ia/diagnosticar':
+      return iaDiagnosticar(env, cuerpo).catch((e) => json({ error: String(e?.message || e) }, 502));
     case 'GET /api/senales':
       return json({ senales: await leer<Json[]>(env, 'senales', []) });
     case 'GET /api/operaciones':

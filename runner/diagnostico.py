@@ -106,6 +106,20 @@ def nube():
         print("⚠ error del ciclo: " + e)
     for n in u.get("notas") or []:
         print("· nota: " + n)
+    st, sn = pedir("GET", "/api/senales")
+    ult = (sn.get("senales") or [{}])[0] if st == 200 else {}
+    linea(st == 200 and bool(ult.get("senales")), f"Señales de la IA: {len(sn.get('senales') or [])} registros; último: " +
+          (", ".join(f"{x.get('simbolo')} {x.get('accion')} {x.get('confianza')}%" for x in ult.get("senales") or []) or "ninguna") if st == 200 else f"/api/senales falla ({st})")
+    st, o = pedir("GET", "/api/ordenes")
+    lista = o.get("ordenes") or []
+    linea(st == 200, f"Órdenes: modo «{o.get('modo')}», {sum(1 for x in lista if x.get('estado') in ('propuesta', 'aprobada'))} pendientes, {len(lista)} en total" if st == 200 else f"/api/ordenes falla ({st})")
+    for x in lista[:3]:
+        print(f"· orden {x.get('origen')} {x.get('accion')} {x.get('simbolo')}: {x.get('estado')}" + (f" · {x.get('nota') or x.get('error')}" if x.get('nota') or x.get('error') else ""))
+    st, h = pedir("GET", "/api/historial")
+    items = h.get("items") or []
+    linea(st == 200 and bool(items), f"Historial: {len(items)} registros" if st == 200 else f"/api/historial falla ({st})")
+    for x in items[:8]:
+        print(f"· {x.get('tipo')} {'✔' if x.get('ok') else '✖'} {x.get('texto')}")
     radar = d.get("radar") or []
     st, r = pedir("GET", "/api/radar")
     radar = r.get("radar") or []

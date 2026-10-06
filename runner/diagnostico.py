@@ -120,6 +120,18 @@ def nube():
     linea(st == 200 and bool(items), f"Historial: {len(items)} registros" if st == 200 else f"/api/historial falla ({st})")
     for x in items[:8]:
         print(f"· {x.get('tipo')} {'✔' if x.get('ok') else '✖'} {x.get('texto')}")
+    st, g = pedir("GET", "/api/graficas")
+    sims = g.get("simbolos") or []
+    linea(st == 200 and bool(sims), f"Gráficas: {', '.join(sims) or 'ninguna todavía'}" if st == 200 else f"/api/graficas falla ({st})")
+    for s_ in sims[:3]:
+        st, gs = pedir("GET", f"/api/graficas?simbolo={s_}")
+        print(f"· {s_}: " + ", ".join(f"{m} {len(v.get('c') or [])} velas" for m, v in (gs.get("marcos") or {}).items()))
+    st, sf = pedir("GET", "/api/semaforo")
+    linea(st == 200, f"Semáforo: v{sf.get('version')} · ciclo #{sf.get('ciclo')} · IA {(sf.get('ia') or {}).get('proveedor')}" if st == 200 else f"/api/semaforo falla ({st})")
+    st, pr = pedir("POST", "/api/ia/probar", {"todos": True})
+    linea(st == 200 and pr.get("ok"), f"Prueba de IA: {pr.get('modelo')} en {pr.get('ms')} ms" + (f" · nuevo principal {pr.get('preferido_nuevo')}" if pr.get("preferido_nuevo") else "") if st == 200 else f"/api/ia/probar falla ({st})")
+    for x in pr.get("pruebas") or []:
+        print(f"· {'✔' if x.get('ok') else '✖'} {x.get('modelo')} {x.get('ms')} ms {x.get('error') or ''}")
     radar = d.get("radar") or []
     st, r = pedir("GET", "/api/radar")
     radar = r.get("radar") or []

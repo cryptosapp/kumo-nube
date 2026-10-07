@@ -8,7 +8,6 @@ Variables de entorno (secretos de tu repositorio de GitHub):
   kumo.json (lo escribe el workflow de instalación) o de KUMO_URL.
 """
 import json
-import math
 import os
 import sys
 import time
@@ -21,6 +20,7 @@ import estrategia as E  # noqa: E402
 import ia  # noqa: E402
 import ordenes as O  # noqa: E402
 import predicciones as PR  # noqa: E402
+import supervisor as SUP  # noqa: E402
 from exchanges import ESTABLES, ErrorExchange, Simulador, crear_exchange, crear_publico  # noqa: E402
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -206,11 +206,16 @@ def ciclo(remoto):
 
     # 3) Beta: la IA revisa los mercados de predicción y tus posiciones en cada ciclo
     #    y propone órdenes (o las ejecuta si activaste «IA ejecuta sola»).
-    pred_ia = None
-    if not simulado and exchange_id == "hyperliquid" and cfg["ia"] != "off" and cfg.get("pred_ia", "proponer") != "off" and hasattr(base, "_info_hl"):
+    pred_ia, revision = None, None
+    pred_activo = not simulado and exchange_id == "hyperliquid" and cfg["ia"] != "off" and cfg.get("pred_ia", "proponer") != "off" and hasattr(base, "_info_hl")
+    if pred_activo:
         nuevas_p, pred_ia = predicciones_ia(base, ex, cfg, preds, pendientes, saldos.get(quote, 0.0), notas)
         for o in nuevas_p:
             if cfg.get("pred_ia") == "auto" and not cfg["pausado"]:
+                # «Solo corto plazo»: lo que vence más lejos queda como propuesta para que tú decidas.
+                if not o.get("regla") and not solo_corto_ok(cfg, o):
+                    o["nota"] = f"Vence en {o.get('horas') or '?'} h: más allá de tu corto plazo ({cfg.get('pred_corto_horas') or 36} h), necesita tu aprobación"
+                    continue
                 o["estado"] = "aprobada"
                 upd, op = O.ejecutar_prediccion(ex, o, simulado)
                 o.update({k: v for k, v in upd.items() if k != "id"})
@@ -221,6 +226,12 @@ def ciclo(remoto):
                 elif upd.get("error"):
                     errores.append(f"IA predicción {o['accion']} {o['etiqueta']}: {upd['error']}")
         nuevas += nuevas_p
+        # Supervisor IA: cada 6 h revisa cómo van y puede ajustar los parámetros (con límites).
+        if SUP.toca(cfg, (remoto.get("estado_runner") or {}).get("super_ts")):
+            try:
+                revision = SUP.revisar(cfg, remoto.get("ordenes_pred") or [], preds, pred_ia, ia.chat_json)
+            except Exception as e:  # nunca debe tumbar el ciclo
+                notas.append(f"Supervisor IA: {type(e).__name__}")
 
     precios_fin = dict(precios)
     total, activos = E.valorar(saldos, precios_fin, quote)
@@ -261,39 +272,42 @@ def ciclo(remoto):
         "ordenes": ordenes_ia(propuestas, bloqueadas, ejecutadas, fallidas, cfg["pausado"], opiniones),
         "graficas": graf,
         "predicciones": preds, "valor_predicciones": valor_preds, "pred_ia": pred_ia,
+        "supervisor": revision,
     }
 
 
+def solo_corto_ok(cfg, o):
+    """¿Puede la IA ejecutar sola esta orden? Con «solo corto plazo» (por defecto) solo
+    si el mercado vence dentro de `pred_corto_horas`."""
+    if cfg.get("pred_auto_solo_corto", True) is False:
+        return True
+    h = o.get("horas")
+    return h is not None and h <= float(cfg.get("pred_corto_horas") or 36)
+
+
 def predicciones_ia(base, ex, cfg, preds, pendientes, libre, notas):
-    """Pide a la IA sus órdenes de predicción y les pone el mejor precio REAL del
-    libro (no el precio medio, que casi nunca se llena). Devuelve (órdenes, resumen)."""
+    """Pide a la IA sus órdenes de predicción. Los mercados (con el modelo) vienen de
+    la nube; cada orden lleva como límite el mejor precio REAL del libro (no el
+    precio medio, que casi nunca se llena). Devuelve (órdenes, resumen)."""
     try:
-        lista = PR.mercados(base._info_hl)
-        nuevas, notas_p, resumen = PR.proponer(cfg, lista, preds, pendientes, libre, ia.opinar_predicciones)
+        lista = http("GET", url_nube() + "/runner/predicciones", os.getenv("KUMO_RUNNER_TOKEN", "")).get("mercados") or []
+        nuevas, notas_p, resumen = PR.proponer(cfg, lista, preds, pendientes, libre, ia.opinar_predicciones, base.mejor_precio_prediccion)
     except Exception as e:  # nunca debe tumbar el ciclo
         notas.append(f"IA predicciones: {type(e).__name__}")
         return [], None
     notas += notas_p
-    margen = float(cfg.get("pred_ventaja") or 8) / 200  # la mitad de la ventaja pedida
     listas = []
     for i, o in enumerate(nuevas):
-        compra = o["accion"] == "COMPRAR"
-        mejor = base.mejor_precio_prediccion(int(o["coin"][1:]), compra)
-        if not mejor or not mejor.get("precio"):
-            notas.append(f"Predicciones: la IA quería {'comprar' if compra else 'vender'} «{o['etiqueta']}» pero no hay {'vendedores' if compra else 'compradores'} ahora")
-            continue
-        p = mejor["precio"]
-        if compra and (p > o["precio_modelo"] - margen or p > o["limite"] + 0.05):
-            notas.append(f"Predicciones: «{o['etiqueta']}» se vende a {p:g} en el libro: ya no tiene ventaja, no la propongo")
-            continue
-        if not compra and p < o["limite"] - 0.08:
-            notas.append(f"Predicciones: la IA sugiere vender «{o['etiqueta']}» pero el mejor comprador solo paga {p:g}")
-            continue
-        if compra:
-            o["unidades"] = max(1, math.ceil(o.pop("monto") / p))
-        o.pop("precio_modelo", None)
-        o.pop("monto", None)
-        o.update({"limite": float(f"{p:.5g}"), "id": f"iap{int(time.time())}{i}", "estado": "propuesta",
+        if o["accion"] == "VENDER":
+            mejor = base.mejor_precio_prediccion(int(o["coin"][1:]), False)
+            if not mejor or not mejor.get("precio"):
+                notas.append(f"Predicciones: quería vender «{o['etiqueta']}» pero no hay compradores ahora")
+                continue
+            if mejor["precio"] < o["limite"] - 0.08:
+                notas.append(f"Predicciones: sugiero vender «{o['etiqueta']}» pero el mejor comprador solo paga {mejor['precio']:g}")
+                continue
+            o["limite"] = mejor["precio"]
+        o.update({"limite": float(f"{o['limite']:.5g}"), "id": f"iap{int(time.time())}{i}", "estado": "propuesta",
                   "caduca": int(time.time() * 1000) + 2 * 3_600_000})  # el precio cambia rápido: caduca en 2 h
         listas.append(o)
     return listas, resumen

@@ -7,8 +7,8 @@ En la cuenta aparecen como saldos «+N», donde N = 10 × id_del_mercado + lado
 La estrategia de monedas nunca los toca: aquí se separan de tus monedas, se les
 pone nombre legible y se valoran con el precio medio del libro (allMids usa la
 forma «#N»). En la beta, además, cada ciclo la IA revisa los mercados de precio
-(«¿SOL ≥ 120 al vencer?») y tus posiciones, y propone (o ejecuta, si lo activas)
-órdenes: ver `mercados` y `proponer`.
+(cripto de hoy y de mediano plazo, bolsa) y tus posiciones, y propone (o ejecuta,
+si lo activas) órdenes: ver `proponer`.
 """
 import math
 import re
@@ -16,7 +16,7 @@ import time
 from datetime import datetime, timezone
 
 PATRON = re.compile(r"^\+(\d+)$")
-TRADUCE = {"Yes": "Sí", "No": "No"}
+TRADUCE = {"Yes": "Sí", "No": "No", "template:Yes": "Sí", "template:No": "No"}
 
 
 def es_prediccion(coin):
@@ -54,18 +54,42 @@ def _num(x):
         return None
 
 
+def _cifra(n):
+    return f"{n:,.0f}".replace(",", " ") if n >= 1000 else f"{n:.6g}"
+
+
 def _pregunta(o, preguntas):
-    """Texto legible del mercado."""
-    c = _campos(o.get("description"))
+    """Texto legible del mercado (igual que en la nube)."""
+    desc = str(o.get("description") or "")
+    c, nombre = _campos(desc), str(o.get("name") or "")
+    q = preguntas.get(o.get("outcome"))
+    cq = _campos(q.get("description")) if q else {}
+    perp = desc.split("|")[0][5:] if desc.startswith("perp:") else None
+    sub = lambda x: {"xyz:XYZ100": "Nasdaq 100", "xyz:SP500": "S&P 500", "xyz:CL": "Petróleo WTI", "xyz:GOLD": "Oro", "xyz:SILVER": "Plata"}.get(x, str(x).replace("xyz:", ""))
     if c.get("class") == "priceBinary" and c.get("underlying"):
         tp = _num(c.get("targetPrice"))
-        precio = f"{tp:,.6g}".replace(",", " ") if tp is not None else c.get("targetPrice", "?")
-        return f"¿{c['underlying']} ≥ {precio} al vencer?"
-    q = preguntas.get(o.get("outcome"))
+        return f"¿{c['underlying']} ≥ {_cifra(tp) if tp is not None else c.get('targetPrice', '?')} al vencer?"
+    if nombre == "template:binaryPrice" and perp and _num(c.get("threshold")):
+        return f"¿{sub(perp)} ≥ {_cifra(_num(c['threshold']))} al vencer?"
+    if nombre == "template:priceTouch" and perp and _num(c.get("target")):
+        return f"¿{sub(perp)} toca {_cifra(_num(c['target']))} antes de vencer?"
+    if nombre == "template:binaryPriceExternal" and _num(c.get("threshold")):
+        return f"¿{c.get('shortName') or c.get('instrument')} ≥ {_cifra(_num(c['threshold']))} al vencer?"
+    if cq.get("class") == "priceBucket" and c.get("index") is not None:
+        t = [x for x in (_num(v) for v in str(cq.get("priceThresholds") or "").split(",")) if x]
+        k = int(c["index"])
+        lo, hi = (t[k - 1] if k > 0 else None), (t[k] if k < len(t) else None)
+        u = cq.get("underlying")
+        return f"¿{u} < {_cifra(hi)} al vencer?" if lo is None else f"¿{u} ≥ {_cifra(lo)} al vencer?" if hi is None else f"¿{u} entre {_cifra(lo)} y {_cifra(hi)} al vencer?"
+    if nombre.startswith("template:policyRate"):
+        que = "mantiene" if "NoChange" in nombre else "baja" if "Decrease" in nombre else "sube"
+        return f"¿La Fed {que} la tasa de interés ({cq.get('decisionLabel') or 'próxima decisión'})?"
+    if nombre.startswith("template:companyIpo") and c.get("company"):
+        return f"¿{c['company']} sale a bolsa…? ({nombre.replace('template:', '')})"
     if c.get("participant"):
-        comp = _campos(q.get("description")).get("competition") if q else None
+        comp = cq.get("competition")
         return f"¿{c['participant']} gana{(' ' + comp) if comp else ''}?"
-    nombre = re.sub(r"^template:", "", str(o.get("name") or "")).strip()
+    nombre = re.sub(r"^template:", "", nombre).strip()
     return nombre or f"Mercado {o.get('outcome')}"
 
 
@@ -109,130 +133,104 @@ def describir(preds, info):
 
 
 # ---------------------------------------------------------------- IA en cada ciclo (beta)
-def _normal(x):
-    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+# La lista de mercados con el modelo y la «ventaja» la arma la nube
+# (GET /runner/predicciones): así la app y el ciclo ven exactamente lo mismo.
+
+def categoria(m):
+    """cripto_hoy | cripto_mediano | bolsa | economia | otro."""
+    return f"cripto_{m.get('plazo')}" if m.get("categoria") == "cripto" else m.get("categoria") or "otro"
 
 
-def prob_modelo(ahora, objetivo, sigma_h, horas):
-    """Probabilidad de terminar ≥ objetivo (log-normal con la volatilidad por hora
-    de las últimas 48 h). Es una referencia, no una certeza. Igual que en la nube."""
-    if not (ahora and objetivo and sigma_h and horas) or min(ahora, objetivo, sigma_h, horas) <= 0:
-        return None
-    s = sigma_h * math.sqrt(horas)
-    return _normal((math.log(ahora / objetivo) - s * s / 2) / s)
-
-
-def _volatilidad(info, sub, ahora_ms):
-    velas = info({"type": "candleSnapshot", "req": {"coin": sub, "interval": "1h", "startTime": ahora_ms - 48 * 3_600_000, "endTime": ahora_ms}}) or []
-    c = [x for x in (_num(v.get("c")) for v in velas) if x and x > 0]
-    if len(c) < 6:
-        return None
-    r = [math.log(b / a) for a, b in zip(c, c[1:])]
-    m = sum(r) / len(r)
-    return {"sigma_h": math.sqrt(sum((x - m) ** 2 for x in r) / (len(r) - 1)),
-            "cambio_24h_pct": round((c[-1] / c[-25] - 1) * 100, 2) if len(c) > 24 else None}
-
-
-def mercados(info, ahora_ms=None, horas_min=1.0, horas_max=36.0, max_subyacentes=8):
-    """Mercados de precio abiertos que vencen entre `horas_min` y `horas_max`, con la
-    probabilidad del modelo y la «ventaja» (puntos) de cada lado: modelo − mercado."""
-    ahora_ms = ahora_ms or int(time.time() * 1000)
-    meta = info({"type": "outcomeMeta"}) or {}
-    mids = info({"type": "allMids"}) or {}
-    out, vols = [], {}
-    for o in meta.get("outcomes") or []:
-        c = _campos(o.get("description"))
-        if c.get("class") != "priceBinary" or not c.get("underlying"):
-            continue
-        vence, objetivo, sub = _vence_ms(c.get("expiry")), _num(c.get("targetPrice")), c["underlying"]
-        if not vence or not objetivo:
-            continue
-        horas = (vence - ahora_ms) / 3_600_000
-        ahora = _num(mids.get(sub))
-        if not (horas_min <= horas <= horas_max) or not ahora:
-            continue
-        if sub not in vols:
-            if len(vols) >= max_subyacentes:
-                continue
-            try:
-                vols[sub] = _volatilidad(info, sub, ahora_ms)
-            except Exception:  # sin velas: sin modelo
-                vols[sub] = None
-        v = vols[sub]
-        p = prob_modelo(ahora, objetivo, v["sigma_h"], horas) if v else None
-        if p is None:
-            continue
-        lados = []
-        for i, sd in enumerate(o.get("sideSpecs") or []):
-            cod = int(o["outcome"]) * 10 + i
-            pr = _num(mids.get(f"#{cod}"))
-            lados.append({"lado": i, "nombre": TRADUCE.get(sd.get("name"), sd.get("name")), "coin": f"#{cod}", "precio": pr,
-                          "prob_modelo": round((p if i == 0 else 1 - p) * 100, 1),
-                          "ventaja": round(((p if i == 0 else 1 - p) - pr) * 100, 1) if pr is not None else None})
-        out.append({"mercado": int(o["outcome"]), "pregunta": _pregunta(o, {}), "subyacente": sub, "objetivo": objetivo,
-                    "precio_actual": ahora, "distancia_pct": round((ahora / objetivo - 1) * 100, 2), "vence": vence,
-                    "horas": round(horas, 1), "cambio_24h_pct": v.get("cambio_24h_pct"), "lados": lados})
-    return out
-
-
-def proponer(cfg, lista, posiciones, pendientes, libre, opinar):
+def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None):
     """La IA revisa los mejores candidatos y tus posiciones. Devuelve
-    (órdenes_nuevas, notas, resumen). Las órdenes salen con `limite` = precio medio:
-    quien llama lo cambia por el mejor precio real del libro antes de crearlas.
+    (órdenes_nuevas, notas, resumen). Con `libro(cod, comprar)` cada candidato se
+    comprueba contra el mejor precio REAL antes de gastar una consulta de IA, y la
+    orden sale con ese precio como límite.
     `opinar(candidatos, posiciones)` → ({coin: {accion, confianza, prob, razon}}, modelo, error)."""
     ventaja_min = float(cfg.get("pred_ventaja") or 8)
     monto, tope = float(cfg.get("pred_monto") or 11), float(cfg.get("pred_max_total") or 30)
-    conf_min = float(cfg.get("ia_conf_min") or 65)
+    conf_min = float(cfg.get("pred_conf_min") if cfg.get("pred_conf_min") is not None else cfg.get("ia_conf_min") or 65)
+    max_ciclo = int(cfg.get("pred_max_ciclo") or 1)
+    pmin, pmax = float(cfg.get("pred_prob_min") or 5) / 100, float(cfg.get("pred_prob_max") or 95) / 100
+    horas_min = float(cfg.get("pred_horas_min") if cfg.get("pred_horas_min") is not None else 1)
+    cats = set(cfg.get("pred_categorias") or ["cripto_hoy"])
+    vender_ia = cfg.get("pred_vender_ia", True) is not False
+    ganancia = float(cfg.get("pred_tomar_ganancia") or 0) / 100
     abiertos = {int(str(p["coin"]).lstrip("+")) // 10 for p in posiciones}
     pend = {(str(o.get("coin")), o.get("accion")) for o in pendientes if o.get("tipo") == "prediccion"}
     abiertos |= {int(c.lstrip("#")) // 10 for c, _ in pend if c.lstrip("#").isdigit()}
     por_mercado = {m["mercado"]: m for m in lista}
+    notas, nuevas = [], []
 
-    cands = []
+    elegibles = []
     for m in lista:
-        if m["mercado"] in abiertos:
+        if m["mercado"] in abiertos or categoria(m) not in cats or m.get("sin_ofertas") or (m.get("horas") or 0) < horas_min:
             continue
         for ld in m["lados"]:
-            if ld["precio"] is not None and 0.05 <= ld["precio"] <= 0.95 and (ld["ventaja"] or 0) >= ventaja_min:
-                cands.append({"coin": ld["coin"], "pregunta": m["pregunta"], "lado": ld["nombre"], "precio": ld["precio"],
-                              "prob_mercado_pct": round(ld["precio"] * 100, 1), "prob_modelo_pct": ld["prob_modelo"], "ventaja_pts": ld["ventaja"],
-                              "subyacente": m["subyacente"], "precio_actual": m["precio_actual"], "objetivo": m["objetivo"],
-                              "distancia_pct": m["distancia_pct"], "horas_para_vencer": m["horas"], "cambio_24h_pct": m["cambio_24h_pct"]})
-    cands.sort(key=lambda x: -x["ventaja_pts"])
-    cands = cands[:3]
+            if ld.get("precio") is not None and ld.get("prob_modelo") is not None and pmin <= ld["precio"] <= pmax and (ld.get("ventaja") or 0) >= ventaja_min:
+                elegibles.append((m, ld))
+    elegibles.sort(key=lambda x: -x[1]["ventaja"])
+    cands, revisados_libro = [], 0
+    for m, ld in elegibles:
+        if len(cands) >= 3 or revisados_libro >= 8:
+            break
+        ask = None
+        if libro:
+            revisados_libro += 1
+            mejor = libro(int(ld["coin"][1:]), True)
+            ask = mejor and mejor.get("precio")
+            # Sin vendedores, o el precio real ya se comió la ventaja: no vale la pena preguntar.
+            if not ask or ask > ld["prob_modelo"] / 100 - ventaja_min / 200 or ask > ld["precio"] + 0.05:
+                continue
+        cands.append({"coin": ld["coin"], "pregunta": m["pregunta"], "regla": m.get("regla"), "lado": ld["nombre"], "precio": ask or ld["precio"],
+                      "prob_mercado_pct": round(ld["precio"] * 100, 1), "prob_modelo_pct": ld["prob_modelo"], "ventaja_pts": ld["ventaja"],
+                      "subyacente": m.get("nombre_sub") or m.get("subyacente"), "precio_actual": m.get("precio_actual"), "objetivo": m.get("objetivo"),
+                      "distancia_pct": m.get("distancia_pct"), "horas_para_vencer": m.get("horas"), "cambio_24h_pct": m.get("cambio_24h_pct")})
 
     revisar = []
     for p in posiciones:
-        if p.get("precio") is None or (p.get("vence") and p["vence"] < time.time() * 1000):
+        if p.get("precio") is None or (p.get("vence") and p["vence"] < time.time() * 1000) or int(p.get("cantidad") or 0) < 1:
             continue
         cod = int(str(p["coin"]).lstrip("+"))
+        coin = f"#{cod}"
+        # Asegurar ganancia: regla fija, sin IA.
+        if ganancia and p["precio"] >= ganancia and (coin, "VENDER") not in pend and len([o for o in nuevas if o["accion"] == "VENDER"]) < 1:
+            nuevas.append({"tipo": "prediccion", "coin": coin, "accion": "VENDER", "unidades": int(p["cantidad"]), "limite": p["precio"],
+                           "etiqueta": f"{p['pregunta']} · {p['lado_nombre']}", "razon": f"Asegurar ganancia: ya vale {p['precio'] * 100:.0f}% (tu regla: {ganancia * 100:.0f}%)",
+                           "confianza": 100, "origen": "ia", "regla": True})
+            continue
+        if not vender_ia:
+            continue
         m = por_mercado.get(cod // 10)
-        ld = (m or {}).get("lados", [None, None])[cod % 10] if m and cod % 10 < len(m["lados"]) else None
-        revisar.append({"coin": f"#{cod}", "pregunta": p["pregunta"], "lado": p["lado_nombre"], "unidades": p["cantidad"], "precio": p["precio"],
-                        "prob_mercado_pct": round(p["precio"] * 100, 1), "prob_modelo_pct": ld and ld["prob_modelo"],
-                        "ventaja_pts": ld and ld["ventaja"], "horas_para_vencer": m and m["horas"],
-                        "precio_actual": m and m["precio_actual"], "objetivo": m and m["objetivo"]})
+        ld = m["lados"][cod % 10] if m and cod % 10 < len(m["lados"]) else {}
+        revisar.append({"coin": coin, "pregunta": p["pregunta"], "regla": m and m.get("regla"), "lado": p["lado_nombre"], "unidades": p["cantidad"], "precio": p["precio"],
+                        "prob_mercado_pct": round(p["precio"] * 100, 1), "prob_modelo_pct": ld.get("prob_modelo"),
+                        "ventaja_pts": ld.get("ventaja"),
+                        "horas_para_vencer": (m and m.get("horas")) or (round((p["vence"] - time.time() * 1000) / 3_600_000, 1) if p.get("vence") else None),
+                        "precio_actual": m and m.get("precio_actual"), "objetivo": m and m.get("objetivo")})
 
-    resumen = {"ts": int(time.time() * 1000), "revisados": len(lista), "candidatos": len(cands), "posiciones": len(revisar),
-               "modelo": None, "opiniones": [], "modo": cfg.get("pred_ia", "proponer")}
+    resumen = {"ts": int(time.time() * 1000), "revisados": len(lista), "elegibles": len(elegibles), "candidatos": len(cands), "posiciones": len(revisar),
+               "categorias": sorted(cats), "modelo": None, "opiniones": [], "modo": cfg.get("pred_ia", "proponer")}
+    if elegibles and not cands and libro:
+        notas.append(f"Predicciones: {len(elegibles)} mercados con ventaja en el modelo, pero en el libro real ya no la tienen (o no hay vendedores)")
     if not cands and not revisar:
-        return [], [], resumen
+        return nuevas, notas, resumen
     opin, modelo, error = opinar(cands, revisar)
     resumen["modelo"] = modelo
     if error:
-        return [], [f"IA predicciones: {error}"], resumen
-    notas, nuevas = [], []
+        return nuevas, notas + [f"IA predicciones: {error}"], resumen
     for x in cands + revisar:
         o = opin.get(x["coin"])
         if o:
             resumen["opiniones"].append({"coin": x["coin"], "pregunta": x["pregunta"], "lado": x["lado"], **o})
 
-    # Compra: como mucho una por ciclo, con monto fijo y sin pasar tu tope total.
+    # Compras: como mucho `pred_max_ciclo`, con monto fijo y sin pasar tu tope total.
     expuesto = sum(p.get("valor") or 0 for p in posiciones) + sum(
         float(o.get("unidades") or 0) * float(o.get("limite") or 0) for o in pendientes if o.get("tipo") == "prediccion" and o.get("accion") == "COMPRAR")
+    compras = 0
     for c in cands:
         o = opin.get(c["coin"]) or {}
-        if o.get("accion") != "COMPRAR" or o.get("confianza", 0) < conf_min:
+        if compras >= max_ciclo or o.get("accion") != "COMPRAR" or o.get("confianza", 0) < conf_min:
             continue
         if o.get("prob") is not None and o["prob"] / 100 < c["precio"] + 0.03:
             continue  # la propia IA no ve margen suficiente
@@ -243,18 +241,45 @@ def proponer(cfg, lista, posiciones, pendientes, libre, opinar):
             notas.append(f"Predicciones: la IA quería comprar «{c['pregunta']} · {c['lado']}» y solo tienes {libre:.2f} USDC libres")
             break
         nuevas.append({"tipo": "prediccion", "coin": c["coin"], "accion": "COMPRAR", "unidades": max(1, math.ceil(monto / c["precio"])),
-                       "limite": c["precio"], "monto": monto, "etiqueta": f"{c['pregunta']} · {c['lado']}", "razon": o.get("razon", ""),
-                       "confianza": o["confianza"], "origen": "ia", "precio_modelo": c["prob_modelo_pct"] / 100,
+                       "limite": c["precio"], "etiqueta": f"{c['pregunta']} · {c['lado']}", "razon": o.get("razon", ""),
+                       "confianza": o["confianza"], "origen": "ia", "horas": c["horas_para_vencer"],
                        "ia": {"accion": "COMPRAR", "confianza": o["confianza"], "razon": o.get("razon", ""), "prob": o.get("prob")}})
-        break
+        expuesto += monto
+        libre -= monto
+        compras += 1
 
-    # Venta: si la IA ve tu lado sobrevalorado (máx. una por ciclo).
+    # Comprar más de una posición tuya si la señal es fuerte (cuenta en las compras del ciclo).
     for r in revisar:
         o = opin.get(r["coin"]) or {}
-        if o.get("accion") != "VENDER" or o.get("confianza", 0) < conf_min or (r["coin"], "VENDER") in pend or int(r["unidades"]) < 1:
+        if compras >= max_ciclo or o.get("accion") != "COMPRAR MÁS" or o.get("confianza", 0) < conf_min or (r["coin"], "COMPRAR") in pend:
             continue
-        nuevas.append({"tipo": "prediccion", "coin": r["coin"], "accion": "VENDER", "unidades": int(r["unidades"]), "limite": r["precio"],
-                       "etiqueta": f"{r['pregunta']} · {r['lado']}", "razon": o.get("razon", ""), "confianza": o["confianza"], "origen": "ia",
-                       "ia": {"accion": "VENDER", "confianza": o["confianza"], "razon": o.get("razon", ""), "prob": o.get("prob")}})
-        break
+        ask = None
+        if libro:
+            mejor = libro(int(r["coin"][1:]), True)
+            ask = mejor and mejor.get("precio")
+            if not ask or ask > r["precio"] + 0.05:
+                continue
+        precio = ask or r["precio"]
+        if not pmin <= precio <= pmax or (o.get("prob") is not None and o["prob"] / 100 < precio + 0.03):
+            continue
+        if expuesto + monto > tope or libre < monto:
+            notas.append(f"Predicciones: la IA quería comprar más de «{r['pregunta']} · {r['lado']}» pero {'pasaría tu tope' if expuesto + monto > tope else 'no hay USDC libres suficientes'}")
+            break
+        nuevas.append({"tipo": "prediccion", "coin": r["coin"], "accion": "COMPRAR", "unidades": max(1, math.ceil(monto / precio)), "limite": precio,
+                       "etiqueta": f"{r['pregunta']} · {r['lado']}", "razon": "Comprar más: " + o.get("razon", ""), "confianza": o["confianza"], "origen": "ia", "horas": r["horas_para_vencer"],
+                       "ia": {"accion": "COMPRAR MÁS", "confianza": o["confianza"], "razon": o.get("razon", ""), "prob": o.get("prob")}})
+        expuesto += monto
+        libre -= monto
+        compras += 1
+
+    # Venta: si la IA ve tu lado sobrevalorado (máx. una por ciclo).
+    if not any(o["accion"] == "VENDER" for o in nuevas):
+        for r in revisar:
+            o = opin.get(r["coin"]) or {}
+            if o.get("accion") != "VENDER" or o.get("confianza", 0) < conf_min or (r["coin"], "VENDER") in pend:
+                continue
+            nuevas.append({"tipo": "prediccion", "coin": r["coin"], "accion": "VENDER", "unidades": int(r["unidades"]), "limite": r["precio"],
+                           "etiqueta": f"{r['pregunta']} · {r['lado']}", "razon": o.get("razon", ""), "confianza": o["confianza"], "origen": "ia", "horas": r["horas_para_vencer"],
+                           "ia": {"accion": "VENDER", "confianza": o["confianza"], "razon": o.get("razon", ""), "prob": o.get("prob")}})
+            break
     return nuevas, notas, resumen

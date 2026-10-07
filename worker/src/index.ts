@@ -28,14 +28,19 @@ const CONFIG_DEFECTO: Json = {
   stop_perdida: 0, nunca_vender_con_perdida: true, ia: 'veto', ia_conf_min: 65, max_ops_ciclo: 2,
   marco: '1h', saldo_simulado: 1000, radar_pedidos: [], ordenes_ia: 'proponer', orden_horas: 24,
   // Beta: la IA revisa los mercados de predicción en cada ciclo.
-  pred_ia: 'proponer', pred_monto: 11, pred_max_total: 30, pred_ventaja: 8,
+  pred_ia: 'proponer', pred_monto: 11, pred_max_total: 30, pred_ventaja: 8, pred_conf_min: 65, pred_max_ciclo: 1,
+  pred_prob_min: 5, pred_prob_max: 95, pred_horas_min: 1, pred_categorias: ['cripto_hoy'], pred_vender_ia: true, pred_tomar_ganancia: 0,
+  pred_auto_solo_corto: true, pred_corto_horas: 36,
+  pred_supervisor: true, pred_monto_techo: 11, pred_max_total_techo: 30, pred_supervisor_log: [],
 };
+const PRED_CATEGORIAS = ['cripto_hoy', 'cripto_mediano', 'bolsa'];
 
 // Límites duros: la app no puede guardar valores fuera de estos rangos.
 const RANGOS: Record<string, [number, number]> = {
   monto_min: [1, 1000], monto_max: [1, 5000], rsi_compra: [5, 60], rsi_venta: [40, 95], banda: [0, 20],
   ganancia_min: [0, 50], stop_perdida: [0, 50], ia_conf_min: [0, 100], max_ops_ciclo: [0, 10], saldo_simulado: [10, 1000000], orden_horas: [1, 168],
-  pred_monto: [10, 500], pred_max_total: [10, 5000], pred_ventaja: [3, 40],
+  pred_monto: [10, 500], pred_max_total: [10, 5000], pred_ventaja: [3, 40], pred_conf_min: [0, 100], pred_max_ciclo: [1, 5],
+  pred_prob_min: [1, 50], pred_prob_max: [50, 99], pred_horas_min: [0, 48], pred_tomar_ganancia: [0, 99], pred_corto_horas: [1, 168],
 };
 
 const CORS = {
@@ -101,6 +106,18 @@ function validarConfig(actual: Json, cambios: Json): { config?: Json; error?: st
     c.pred_ia = cambios.pred_ia;
   }
   if (c.pred_monto > c.pred_max_total) return { error: 'El monto por compra no puede pasar del tope total' };
+  if (c.pred_tomar_ganancia > 0 && c.pred_tomar_ganancia < 50) return { error: 'Asegurar ganancia: 0 (apagado) o entre 50 y 99%' };
+  if (cambios.pred_categorias !== undefined) {
+    const l = Array.isArray(cambios.pred_categorias) ? [...new Set(cambios.pred_categorias.map(String))] : null;
+    if (!l || l.some((x) => !PRED_CATEGORIAS.includes(x))) return { error: 'Categorías de predicción inválidas' };
+    c.pred_categorias = l;
+  }
+  if (cambios.pred_vender_ia !== undefined) c.pred_vender_ia = Boolean(cambios.pred_vender_ia);
+  if (cambios.pred_supervisor !== undefined) c.pred_supervisor = Boolean(cambios.pred_supervisor);
+  if (cambios.pred_auto_solo_corto !== undefined) c.pred_auto_solo_corto = Boolean(cambios.pred_auto_solo_corto);
+  // Lo que pone el usuario es el techo: el supervisor IA solo puede bajarlo.
+  if (cambios.pred_monto !== undefined) c.pred_monto_techo = c.pred_monto;
+  if (cambios.pred_max_total !== undefined) c.pred_max_total_techo = c.pred_max_total;
   if (cambios.nunca_vender_con_perdida !== undefined) c.nunca_vender_con_perdida = Boolean(cambios.nunca_vender_con_perdida);
   if (cambios.objetivo !== undefined) {
     const obj: Json = {};
@@ -120,6 +137,35 @@ function validarConfig(actual: Json, cambios: Json): { config?: Json; error?: st
     c.modo = cambios.modo;
   }
   return { config: c };
+}
+
+// Supervisor IA de predicciones: solo parámetros de la lista, validados igual que
+// los del usuario, y el dinero nunca por encima del techo que puso el usuario.
+const SUPERVISABLES = ['pred_ventaja', 'pred_conf_min', 'pred_prob_min', 'pred_prob_max', 'pred_horas_min', 'pred_max_ciclo', 'pred_monto', 'pred_max_total', 'pred_categorias'];
+async function aplicarSupervisor(env: Env, ahora: number, s: Json): Promise<void> {
+  const actual = await leerConfig(env);
+  if (actual.pred_supervisor === false) return;
+  const cambios: Json = {};
+  for (const k of SUPERVISABLES) if (s.cambios[k] !== undefined) cambios[k] = s.cambios[k];
+  if (cambios.pred_monto !== undefined) cambios.pred_monto = Math.min(Number(cambios.pred_monto), Number(actual.pred_monto_techo ?? actual.pred_monto));
+  if (cambios.pred_max_total !== undefined) cambios.pred_max_total = Math.min(Number(cambios.pred_max_total), Number(actual.pred_max_total_techo ?? actual.pred_max_total));
+  if (cambios.pred_conf_min !== undefined) cambios.pred_conf_min = Math.max(50, Number(cambios.pred_conf_min));
+  const v = validarConfig(actual, cambios);
+  if (!v.config) {
+    await bitacora(env, [{ ts: ahora, tipo: 'supervisor', ok: false, texto: `Supervisor IA: cambio rechazado (${v.error})` }]);
+    return;
+  }
+  // validarConfig trata lo que llega como si fuera del usuario: los techos no se mueven.
+  v.config.pred_monto_techo = actual.pred_monto_techo ?? actual.pred_monto;
+  v.config.pred_max_total_techo = actual.pred_max_total_techo ?? actual.pred_max_total;
+  const hechos = Object.keys(cambios).filter((k) => JSON.stringify(actual[k]) !== JSON.stringify(v.config![k]))
+    .map((k) => ({ k, antes: actual[k], despues: v.config![k] }));
+  if (!hechos.length) return;
+  v.config.pred_supervisor_log = [{ ts: ahora, modelo: s.modelo || null, razon: String(s.razon || '').slice(0, 300), cambios: hechos }, ...(actual.pred_supervisor_log || [])].slice(0, 8);
+  await env.KUMO.put('config', JSON.stringify(v.config));
+  const txt = hechos.map((h) => `${h.k} ${JSON.stringify(h.antes)} → ${JSON.stringify(h.despues)}`).join(', ');
+  await bitacora(env, [{ ts: ahora, tipo: 'supervisor', ok: true, texto: `Supervisor IA ajustó predicciones: ${txt}. ${String(s.razon || '').slice(0, 160)}` }]);
+  await avisar(env, [{ kind: 'supervisor', title: '🎲 El supervisor IA ajustó tus predicciones', body: txt.slice(0, 160) }]);
 }
 
 async function avisar(env: Env, items: Json[]) {
@@ -381,7 +427,8 @@ async function runnerReporte(env: Env, r: Json): Promise<Response> {
   const nuevo: Json = {
     ciclo, actualizado: ahora, serie, ultimo: { ...ultimo, ts: ahora },
     historial: historial.slice(-500),
-    runner: { costos: costos ?? estado.runner?.costos ?? {}, cartera_sim: cartera_sim ?? estado.runner?.cartera_sim ?? null },
+    runner: { costos: costos ?? estado.runner?.costos ?? {}, cartera_sim: cartera_sim ?? estado.runner?.cartera_sim ?? null,
+      super_ts: r.supervisor?.ts ?? estado.runner?.super_ts ?? null },
     radar: Array.isArray(radar) && radar.length ? radar : estado.radar || [],
     radar_ts: Array.isArray(radar) && radar.length ? ahora : estado.radar_ts || null,
   };
@@ -393,6 +440,7 @@ async function runnerReporte(env: Env, r: Json): Promise<Response> {
   }
 
   await guardarSenales(env, ciclo, ahora, r);
+  if (r.supervisor && r.supervisor.cambios && Object.keys(r.supervisor.cambios).length) await aplicarSupervisor(env, ahora, r.supervisor);
   await mezclarOrdenes(env, ahora, r);
   await bitacoraCiclo(env, ciclo, ahora, r);
 
@@ -418,7 +466,8 @@ async function runnerConfig(env: Env): Promise<Response> {
   const [config, estado] = await Promise.all([leerConfig(env), leer<Json>(env, 'estado', {})]);
   const ordenes = (await leerOrdenes(env)).filter((o) => o.estado === 'propuesta' || o.estado === 'aprobada');
   const ia_pref = await env.KUMO.get('ia_pref');
-  return json({ config, estado_runner: estado.runner || {}, ordenes, ia_pref });
+  const ordenes_pred = (await leerOrdenes(env)).filter((o) => o.tipo === 'prediccion').slice(0, 20);
+  return json({ config, estado_runner: estado.runner || {}, ordenes, ia_pref, ordenes_pred });
 }
 
 // ---------------------------------------------------------------- IA radar
@@ -546,16 +595,21 @@ function probModelo(ahora: number, objetivo: number, sigmaH: number, horas: numb
   const s = sigmaH * Math.sqrt(horas);
   return normal((Math.log(ahora / objetivo) - s * s / 2) / s);
 }
+// Volatilidad por hora del subyacente: últimas 48 h para lo que vence pronto y
+// 7 días para el mediano plazo. Una sola petición de velas 1h por subyacente
+// (el plan gratis de Cloudflare permite 50 subpeticiones por llamada).
 async function volatilidades(subyacentes: string[]): Promise<Json> {
   const out: Json = {};
-  await Promise.all(subyacentes.slice(0, 8).map(async (u) => {
+  await Promise.all(subyacentes.slice(0, 30).map(async (u) => {
     try {
-      const velas: Json[] = await hlInfo({ type: 'candleSnapshot', req: { coin: u, interval: '1h', startTime: Date.now() - 48 * 3_600_000, endTime: Date.now() } });
+      const velas: Json[] = await hlInfo({ type: 'candleSnapshot', req: { coin: u, interval: '1h', startTime: Date.now() - 7 * 24 * 3_600_000, endTime: Date.now() } });
       const c = velas.map((v) => Number(v.c)).filter((x) => x > 0);
       if (c.length < 6) return;
-      const r = c.slice(1).map((x, i) => Math.log(x / c[i]));
-      const m = r.reduce((a, b) => a + b, 0) / r.length;
-      out[u] = { sigma_h: Math.sqrt(r.reduce((a, b) => a + (b - m) ** 2, 0) / (r.length - 1)), cambio_24h_pct: c.length > 24 ? Math.round((c[c.length - 1] / c[c.length - 25] - 1) * 10000) / 100 : null };
+      const sigma = (xs: number[]) => {
+        const r = xs.slice(1).map((x, i) => Math.log(x / xs[i])), m = r.reduce((a, b) => a + b, 0) / r.length;
+        return Math.sqrt(r.reduce((a, b) => a + (b - m) ** 2, 0) / Math.max(1, r.length - 1));
+      };
+      out[u] = { sigma_48h: sigma(c.slice(-49)), sigma_7d: sigma(c), cambio_24h_pct: c.length > 24 ? Math.round((c[c.length - 1] / c[c.length - 25] - 1) * 10000) / 100 : null };
     } catch { /* sin velas: sin modelo */ }
   }));
   return out;
@@ -579,7 +633,7 @@ async function prediccionGrafica(url: URL): Promise<Response> {
   const mem = graficaPredMem.get(coin);
   if (mem && Date.now() - mem.ts < 60_000) return json({ ...mem.datos, cache: true });
   const cod = Number(coin.slice(1)), mercado = Math.floor(cod / 10), lado = cod % 10;
-  const lista: Json[] = (mercadosMem && Date.now() - mercadosMem.ts < 300_000 ? mercadosMem.datos.mercados : null) || (await (await prediccionMercados()).json() as Json).mercados || [];
+  const lista: Json[] = (await listaMercados()).mercados || [];
   const m = lista.find((x) => x.mercado === mercado);
   if (!m) return json({ error: 'Ese mercado ya no está abierto.' }, 404);
   const ahora = Date.now(), ld = m.lados[lado] || {};
@@ -596,50 +650,138 @@ async function prediccionGrafica(url: URL): Promise<Response> {
     m.subyacente ? velas(m.subyacente, '1d', 2400) : null,
   ]);
   const datos: Json = { coin, mercado, lado, pregunta: m.pregunta, lado_nombre: ld.nombre, precio_lado: ld.precio ?? null, ventaja: ld.ventaja ?? null,
-    prob_modelo: m.prob_modelo != null ? (lado === 0 ? m.prob_modelo : Math.round((100 - m.prob_modelo) * 10) / 10) : null,
+    prob_modelo: ld.prob_modelo ?? null, regla: m.regla, tipo: m.tipo, lineas: m.lineas || [], nombre_sub: m.nombre_sub,
     subyacente: m.subyacente, objetivo: m.objetivo, precio_actual: m.precio_actual ?? null, vence: m.vence, ts: ahora, prob,
     marcos: m.subyacente ? { '1h': h1, '4h': h4, '1d': d1 } : null };
   graficaPredMem.set(coin, { ts: ahora, datos });
   return json(datos);
 }
+// ---- Lectura de los mercados de Hyperliquid (HIP-4). Sin deportes. Categorías:
+// cripto (hoy / mediano plazo), bolsa y materias primas (perps «xyz:»), economía
+// y empresas (tasa de la Fed, salidas a bolsa) y otros.
+const NOMBRES_SUB: Json = { 'xyz:XYZ100': 'Nasdaq 100', 'xyz:SP500': 'S&P 500', 'xyz:CL': 'Petróleo WTI', 'xyz:BRENTOIL': 'Petróleo Brent', 'xyz:GOLD': 'Oro', 'xyz:SILVER': 'Plata', 'xyz:SPCX': 'SpaceX' };
+const nombreSub = (s: string) => NOMBRES_SUB[s] || s.replace(/^xyz:/, '');
+// Miles con espacio (85 501) para que no se confundan con decimales (88.303).
+const cifra = (n: number) => (n >= 1000 ? String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ') : String(Number(n.toPrecision(6))));
+const ES_DEPORTE = /sport|award|contest/i;
+const HORAS_HOY = 36;
+function nombreLado(n: unknown): string {
+  const x = String(n || '').replace(/^template:/, '');
+  return x === 'Yes' ? 'Sí' : x === 'Over' ? 'Más' : x === 'Under' ? 'Menos' : x;
+}
+function fechaCorta(ms: number | null): string {
+  return ms ? new Date(ms).toLocaleDateString('es', { day: 'numeric', month: 'short', timeZone: 'UTC' }) : '';
+}
+// Qué pregunta un mercado y cómo modelarlo. null = deportes o relleno («otro resultado»).
+function leerMercado(o: Json, q: Json | undefined): Json | null {
+  const nombre = String(o.name || ''), desc = String(o.description || ''), c = campos(desc), cq = q ? campos(q.description) : {};
+  if (ES_DEPORTE.test(nombre) || ES_DEPORTE.test(String(q?.name || '')) || c.participant || c.competition || c.candidate || cq.sport || cq.competition || cq.award) return null;
+  if (/fallback/i.test(nombre) || desc === 'other') return null;
+  const perp = desc.startsWith('perp:') ? desc.split('|')[0].slice(5) : null;
+  if (c.class === 'priceBinary' && c.underlying) return { tipo: 'precio', sub: c.underlying, objetivo: Number(c.targetPrice), vence: venceMs(c.expiry) };
+  if (nombre === 'template:binaryPrice' && perp) return { tipo: 'precio', sub: perp, objetivo: Number(c.threshold), vence: venceMs(c.time) };
+  if (nombre === 'template:priceTouch' && perp) return { tipo: 'toque', sub: perp, objetivo: Number(c.target), vence: venceMs(c.time) };
+  if (nombre === 'template:binaryPriceExternal') return { tipo: 'precio', externo: c.shortName || c.instrument, objetivo: Number(c.threshold), vence: venceMs(c.time) };
+  if (cq.class === 'priceBucket' && cq.underlying && c.index != null) {
+    const t = String(cq.priceThresholds || '').split(',').map(Number).filter((x) => x > 0), k = Number(c.index);
+    return { tipo: 'rango', sub: cq.underlying, desde: k > 0 ? t[k - 1] : null, hasta: k < t.length ? t[k] : null, vence: venceMs(cq.expiry) };
+  }
+  if (/^template:policyRate/.test(nombre)) {
+    const quien = /federal/i.test(String(cq.institution || '')) ? 'la Fed' : String(cq.institution || 'el banco central');
+    const que = /NoChange/.test(nombre) ? 'mantiene' : /Decrease/.test(nombre) ? 'baja' : 'sube';
+    return { tipo: 'evento', categoria: 'economia', pregunta: `¿${quien[0].toUpperCase() + quien.slice(1)} ${que} la tasa de interés (${cq.decisionLabel || 'próxima decisión'})?`,
+      regla: `«Sí» gana si ${quien} ${que} la tasa en esa decisión.`, vence: venceMs(cq.scheduledDecision) ?? venceMs(cq.decisionDeadline) };
+  }
+  if (nombre === 'template:companyIpoConfirmed') {
+    const v = venceMs(c.dateTime);
+    return { tipo: 'evento', categoria: 'economia', pregunta: `¿${c.company} confirma su salida a bolsa antes del ${fechaCorta(v)}?`, regla: `«Sí» gana si ${c.company} confirma oficialmente su salida a bolsa antes del ${fechaCorta(v)}.`, vence: v };
+  }
+  if (nombre === 'template:companyIpoFirstDayMarketCap') {
+    const b = Number(c.marketCapThresholdB);
+    return { tipo: 'evento', categoria: 'economia', pregunta: `¿${c.company} vale ${b >= 1000 ? cifra(b / 1000) + ' billones' : cifra(b) + ' mil millones'} de USD o más en su primer día en bolsa?`,
+      regla: `«Sí» gana si ${c.company} sale a bolsa antes del ${fechaCorta(venceMs(c.listingDeadline))} y cierra su primer día con ese valor o más.`, vence: venceMs(c.listingDeadline) };
+  }
+  const n2 = nombre.replace(/^template:/, '');
+  return { tipo: 'evento', categoria: 'otro', pregunta: desc && desc !== 'other' ? `${n2} · ${desc.slice(0, 80)}` : n2, vence: venceMs(cq.resolutionDeadline) };
+}
+function probSobre(ahora: number, nivel: number, sigmaH: number, horas: number): number | null {
+  return probModelo(ahora, nivel, sigmaH, horas);
+}
+// Probabilidad de TOCAR un nivel antes de vencer (principio de reflexión, sin tendencia).
+function probToque(ahora: number, nivel: number, sigmaH: number, horas: number): number | null {
+  if (!(ahora > 0 && nivel > 0 && sigmaH > 0 && horas > 0)) return null;
+  return Math.min(1, 2 * (1 - normal(Math.abs(Math.log(nivel / ahora)) / (sigmaH * Math.sqrt(horas)))));
+}
 let mercadosMem: { ts: number; datos: Json } | null = null;
-async function prediccionMercados(): Promise<Response> {
-  if (mercadosMem && Date.now() - mercadosMem.ts < 60_000) return json({ ...mercadosMem.datos, cache: true });
-  const [meta, mids] = await Promise.all([hlInfo({ type: 'outcomeMeta' }), hlInfo({ type: 'allMids' })]);
+async function listaMercados(): Promise<Json> {
+  if (mercadosMem && Date.now() - mercadosMem.ts < 60_000) return { ...mercadosMem.datos, cache: true };
+  const [meta, mids, midsXyz] = await Promise.all([hlInfo({ type: 'outcomeMeta' }), hlInfo({ type: 'allMids' }), hlInfo({ type: 'allMids', dex: 'xyz' }).catch(() => ({}))]);
+  const todos: Json = { ...mids, ...midsXyz };
   const preguntas: Json = {};
   for (const q of meta.questions || []) for (const n of [...(q.namedOutcomes || []), q.fallbackOutcome]) preguntas[n] = q;
   const ahora = Date.now(), lista: Json[] = [];
   for (const o of meta.outcomes || []) {
-    const c = campos(o.description), q = preguntas[o.outcome], cq = q ? campos(q.description) : {};
-    const vence = venceMs(c.expiry) ?? venceMs(cq.resolutionDeadline);
-    if (vence && vence < ahora) continue;
-    const lados = (o.sideSpecs || []).map((sd: Json, i: number) => ({ nombre: sd.name === 'Yes' ? 'Sí' : sd.name, coin: `#${o.outcome * 10 + i}`, precio: mids[`#${o.outcome * 10 + i}`] != null ? Number(mids[`#${o.outcome * 10 + i}`]) : null }));
+    const m = leerMercado(o, preguntas[o.outcome]);
+    if (!m) continue;
+    if (m.vence && m.vence < ahora) continue;
+    if (m.externo && todos['xyz:' + m.externo]) m.sub = 'xyz:' + m.externo;
+    const lados = (o.sideSpecs || []).map((sd: Json, i: number) => {
+      const cod = o.outcome * 10 + i;
+      return { nombre: nombreLado(sd.name), coin: `#${cod}`, precio: todos[`#${cod}`] != null ? Number(todos[`#${cod}`]) : null };
+    });
     if (!lados.some((l: Json) => l.precio != null)) continue;
-    const precioB = c.class === 'priceBinary';
-    let pregunta = String(o.name || '').replace(/^template:/, '');
-    if (precioB) pregunta = `¿${c.underlying} ≥ ${Number(c.targetPrice).toLocaleString('es')} al vencer?`;
-    else if (c.participant) pregunta = `¿${c.participant} gana${cq.competition ? ' ' + cq.competition : ''}?`;
-    else if (o.description && o.description !== 'other') pregunta = `${pregunta} · ${String(o.description).slice(0, 80)}`;
-    lista.push({ mercado: o.outcome, pregunta, clase: precioB ? 'precio' : c.participant ? 'deporte' : 'otro', subyacente: precioB ? c.underlying : null,
-      objetivo: precioB ? Number(c.targetPrice) : null, periodo: c.period || null, vence, lados, quote: o.quoteToken || 'USDC' });
-  }
-  const vol = await volatilidades([...new Set(lista.filter((m) => m.subyacente).map((m) => String(m.subyacente)))]);
-  for (const m of lista) {
-    if (!m.subyacente || !mids[m.subyacente]) continue;
-    m.precio_actual = Number(mids[m.subyacente]);
-    m.distancia_pct = Math.round((m.precio_actual / m.objetivo - 1) * 10000) / 100;
-    const v = vol[m.subyacente];
-    const p = v ? probModelo(m.precio_actual, m.objetivo, v.sigma_h, (m.vence - ahora) / 3_600_000) : null;
-    if (p != null) {
-      m.prob_modelo = Math.round(p * 1000) / 10;
-      // Ventaja = probabilidad del modelo − precio del mercado, para cada lado.
-      m.lados.forEach((l: Json, i: number) => { if (l.precio != null) l.ventaja = Math.round(((i === 0 ? p : 1 - p) - l.precio) * 1000) / 10; });
+    // 0.5 / 0.5 exactos = libro vacío: ese precio no es real y la «ventaja» sería falsa.
+    const sinOfertas = lados.length === 2 && lados.every((l: Json) => l.precio === 0.5);
+    const N = m.sub ? nombreSub(m.sub) : m.externo || '';
+    let pregunta = m.pregunta, regla = m.regla, lineas: Json[] = [];
+    if (m.tipo === 'precio') { pregunta = `¿${N} ≥ ${cifra(m.objetivo)} al vencer?`; regla = `«Sí» gana si ${N} está en ${cifra(m.objetivo)} o más al vencer.`; lineas = [{ p: m.objetivo, t: 'objetivo' }]; }
+    if (m.tipo === 'toque') { pregunta = `¿${N} toca ${cifra(m.objetivo)} antes del ${fechaCorta(m.vence)}?`; regla = `«Sí» gana si ${N} toca ${cifra(m.objetivo)} en cualquier momento antes de vencer.`; lineas = [{ p: m.objetivo, t: 'toque' }]; }
+    if (m.tipo === 'rango') {
+      pregunta = m.desde == null ? `¿${N} < ${cifra(m.hasta)} al vencer?` : m.hasta == null ? `¿${N} ≥ ${cifra(m.desde)} al vencer?` : `¿${N} entre ${cifra(m.desde)} y ${cifra(m.hasta)} al vencer?`;
+      regla = `«Sí» gana si al vencer ${N} está ${m.desde == null ? `por debajo de ${cifra(m.hasta)}` : m.hasta == null ? `en ${cifra(m.desde)} o más` : `entre ${cifra(m.desde)} y ${cifra(m.hasta)}`}.`;
+      lineas = [m.desde, m.hasta].filter((x) => x != null).map((p) => ({ p, t: 'límite' }));
     }
+    const horas = m.vence ? Math.round((m.vence - ahora) / 360_000) / 10 : null;
+    const categoria = m.categoria || (m.sub ? (m.sub.startsWith('xyz:') ? 'bolsa' : 'cripto') : m.externo ? 'bolsa' : 'otro');
+    lista.push({ mercado: o.outcome, pregunta, regla: regla || null, tipo: m.tipo, categoria, plazo: horas != null && horas <= HORAS_HOY ? 'hoy' : 'mediano',
+      subyacente: m.sub || null, nombre_sub: N || null, objetivo: m.tipo === 'rango' ? null : m.objetivo ?? null, desde: m.desde ?? null, hasta: m.hasta ?? null, lineas,
+      vence: m.vence || null, horas, lados, quote: o.quoteToken || 'USDC', sin_ofertas: sinOfertas || undefined });
   }
-  lista.sort((a, b) => (a.clase === 'precio' ? 0 : 1) - (b.clase === 'precio' ? 0 : 1) || (a.vence || 9e15) - (b.vence || 9e15));
-  const datos = { ts: ahora, mercados: lista.slice(0, 120), total: lista.length };
+  const vol = await volatilidades([...new Set(lista.filter((m) => m.subyacente && todos[m.subyacente]).map((m) => String(m.subyacente)))]);
+  for (const m of lista) {
+    if (!m.subyacente || !todos[m.subyacente]) continue;
+    const S = Number(todos[m.subyacente]), v = vol[m.subyacente];
+    m.precio_actual = S;
+    if (m.objetivo) m.distancia_pct = Math.round((S / m.objetivo - 1) * 10000) / 100;
+    if (!v || !m.horas || m.horas <= 0) continue;
+    m.cambio_24h_pct = v.cambio_24h_pct;
+    const sg = m.horas <= 48 ? v.sigma_48h : v.sigma_7d;
+    let p: number | null = null;
+    if (m.tipo === 'precio') p = probSobre(S, m.objetivo, sg, m.horas);
+    else if (m.tipo === 'toque') p = probToque(S, m.objetivo, sg, m.horas);
+    else if (m.tipo === 'rango') {
+      const a = m.desde == null ? 1 : probSobre(S, m.desde, sg, m.horas), b = m.hasta == null ? 0 : probSobre(S, m.hasta, sg, m.horas);
+      p = a != null && b != null ? Math.max(0, a - b) : null;
+    }
+    if (p == null) continue;
+    m.prob_modelo = Math.round(p * 1000) / 10;
+    // Ventaja = probabilidad del modelo − precio del mercado, para cada lado.
+    m.lados.forEach((l: Json, i: number) => {
+      const pl = i === 0 ? p! : 1 - p!;
+      l.prob_modelo = Math.round(pl * 1000) / 10;
+      if (l.precio != null && !m.sin_ofertas) l.ventaja = Math.round((pl - l.precio) * 1000) / 10;
+    });
+  }
+  const orden: Json = { cripto: 0, bolsa: 1, economia: 2, otro: 3 };
+  lista.sort((a, b) => orden[a.categoria] - orden[b.categoria] || (a.vence || 9e15) - (b.vence || 9e15));
+  const cuenta: Json = {};
+  for (const m of lista) { const k = m.categoria === 'cripto' ? `cripto_${m.plazo}` : m.categoria; cuenta[k] = (cuenta[k] || 0) + 1; }
+  const datos = { ts: ahora, mercados: lista.slice(0, 200), total: lista.length, cuenta };
   mercadosMem = { ts: ahora, datos };
-  return json(datos);
+  return datos;
+}
+async function prediccionMercados(): Promise<Response> {
+  return json(await listaMercados());
 }
 
 async function prediccionAnalizar(env: Env, c: Json): Promise<Response> {
@@ -651,28 +793,33 @@ async function prediccionAnalizar(env: Env, c: Json): Promise<Response> {
   if (mem && Date.now() - mem.ts < 10 * 60_000) return json({ ...mem.datos, cache: true });
   const estado = await leer<Json>(env, 'estado', {});
   let p = ((estado.ultimo?.predicciones || []) as Json[]).find((x) => x.coin === coin);
-  if (!p && explorar) {
-    const lista: Json[] = (mercadosMem?.datos.mercados) || (await (await prediccionMercados()).json() as Json).mercados || [];
-    const m = lista.find((x) => x.mercado === Number(c.mercado));
-    if (m) p = { coin, pregunta: m.pregunta, lado_nombre: m.lados[Number(c.lado) ? 1 : 0]?.nombre, cantidad: 0, pago_si_acierta: 0, vence: m.vence, subyacente: m.subyacente, objetivo: m.objetivo, prob_modelo: m.prob_modelo };
-  }
+  // Datos del mercado (regla, modelo) de la lista abierta, tengas o no posición.
+  const cod0 = Number(coin.slice(1)), lista: Json[] = (await listaMercados().catch(() => ({ mercados: [] }))).mercados || [];
+  const mm = lista.find((x) => x.mercado === Math.floor(cod0 / 10)), ld = mm?.lados[cod0 % 10];
+  if (!p && explorar && mm) p = { coin, pregunta: mm.pregunta, lado_nombre: ld?.nombre, cantidad: 0, pago_si_acierta: 0, vence: mm.vence };
+  if (p && mm) Object.assign(p, { subyacente: mm.subyacente, objetivo: mm.objetivo, regla: mm.regla, tipo: mm.tipo, prob_modelo_lado: ld?.prob_modelo ?? null, desde: mm.desde, hasta: mm.hasta });
   if (!p) return json({ error: explorar ? 'Ese mercado ya no está abierto.' : 'Esa predicción no está en tu último ciclo: espera al próximo.' }, 404);
   if (p.vence && p.vence < Date.now()) return json({ error: 'Esta predicción ya venció: se liquida sola.' }, 409);
   // Datos frescos y públicos: probabilidad actual, precio del subyacente y sus últimas 24 h.
   const mercado: Json = { pregunta: p.pregunta, tu_lado: p.lado_nombre, unidades: p.cantidad, pago_si_aciertas: p.pago_si_acierta, tiene_posicion: (p.cantidad || 0) > 0,
-    prob_modelo_estadistico_si_pct: p.prob_modelo ?? null,
+    regla: p.regla || null, tipo_mercado: p.tipo || null,
+    prob_modelo_estadistico_tu_lado_pct: p.prob_modelo_lado ?? null, rango: p.tipo === 'rango' ? [p.desde, p.hasta] : undefined,
     horas_para_vencer: p.vence ? Math.round((p.vence - Date.now()) / 360_000) / 10 : null };
   try {
-    const mids: Json = await hlInfo({ type: 'allMids' });
-    const cod = coin.slice(1);
+    const [m1, m2] = await Promise.all([hlInfo({ type: 'allMids' }), hlInfo({ type: 'allMids', dex: 'xyz' }).catch(() => ({}))]);
+    const mids: Json = { ...m1, ...m2 }, cod = coin.slice(1);
     mercado.precio_tu_lado = Number(mids['#' + cod] ?? p.precio);
     mercado.prob_mercado_tu_lado_pct = Math.round(mercado.precio_tu_lado * 1000) / 10;
     if (p.subyacente && mids[p.subyacente]) {
       const ahora = Number(mids[p.subyacente]);
       mercado.subyacente = p.subyacente; mercado.precio_actual = ahora; mercado.objetivo = p.objetivo;
       mercado.distancia_al_objetivo_pct = p.objetivo ? Math.round((ahora / p.objetivo - 1) * 10000) / 100 : null;
-      const velas: Json[] = await hlInfo({ type: 'candleSnapshot', req: { coin: p.subyacente, interval: '1h', startTime: Date.now() - 24 * 3_600_000, endTime: Date.now() } });
-      const cierres = velas.map((v) => Number(v.c)).filter((x) => x > 0);
+      const velas: Json[] = await hlInfo({ type: 'candleSnapshot', req: { coin: p.subyacente, interval: '1h', startTime: Date.now() - 7 * 24 * 3_600_000, endTime: Date.now() } });
+      const todas = velas.map((v) => Number(v.c)).filter((x) => x > 0), cierres = todas.slice(-25);
+      if (todas.length > 30) {
+        mercado.cambio_7d_pct = Math.round((ahora / todas[0] - 1) * 10000) / 100;
+        mercado.rango_7d = [Math.min(...todas), Math.max(...todas)];
+      }
       if (cierres.length > 2) {
         const max = Math.max(...cierres), min = Math.min(...cierres);
         mercado.cambio_24h_pct = Math.round((ahora / cierres[0] - 1) * 10000) / 100;
@@ -687,7 +834,7 @@ async function prediccionAnalizar(env: Env, c: Json): Promise<Response> {
   const t0 = Date.now();
   const { datos: d, modelo } = await iaChat(env, [
     { role: 'system', content: 'Eres un analista prudente de mercados de predicción. Explicas a un principiante en español sencillo. No prometes resultados. Respondes SOLO JSON válido.' },
-    { role: 'user', content: `El usuario tiene esta posición en un mercado de predicción de Hyperliquid (cada unidad paga 1 si acierta y 0 si no; el precio es la probabilidad que le da el mercado):\n${JSON.stringify(mercado)}\nAnaliza si su lado tiene buenas probabilidades comparando el precio actual con el objetivo, el tiempo que queda y cuánto se mueve el precio. Compara tu probabilidad con la del mercado. ${mercado.tiene_posicion ? 'Sugiere UNA acción: MANTENER (esperar al vencimiento), VENDER (cerrar ahora al precio del mercado) o COMPRAR MÁS.' : 'El usuario aún NO tiene posición en este lado: sugiere COMPRAR (entrar en este lado) o NO ENTRAR.'}\nFormato: {"sugerencia":"MANTENER|VENDER|COMPRAR MÁS|COMPRAR|NO ENTRAR","confianza":0-100,"prob_estimada":0-100,"analisis":"2-4 frases","riesgos":["..."]}` },
+    { role: 'user', content: `El usuario mira esta posición en un mercado de predicción de Hyperliquid (cada unidad paga 1 si acierta y 0 si no; el precio es la probabilidad que le da el mercado):\n${JSON.stringify(mercado)}\nAnaliza si su lado tiene buenas probabilidades: lee la regla del mercado; si depende de un precio, compara el precio actual con el objetivo, el tiempo que queda y cuánto se mueve; si es un evento (economía, empresas), usa lo que sepas y di claramente si tu información puede estar desactualizada. Compara tu probabilidad con la del mercado. ${mercado.tiene_posicion ? 'Sugiere UNA acción: MANTENER (esperar al vencimiento), VENDER (cerrar ahora al precio del mercado) o COMPRAR MÁS.' : 'El usuario aún NO tiene posición en este lado: sugiere COMPRAR (entrar en este lado) o NO ENTRAR.'}\nFormato: {"sugerencia":"MANTENER|VENDER|COMPRAR MÁS|COMPRAR|NO ENTRAR","confianza":0-100,"prob_estimada":0-100,"analisis":"2-4 frases","riesgos":["..."]}` },
   ]);
   const validas = mercado.tiene_posicion ? ['MANTENER', 'VENDER', 'COMPRAR MÁS'] : ['COMPRAR', 'NO ENTRAR'];
   const sug = validas.includes(String(d.sugerencia).toUpperCase()) ? String(d.sugerencia).toUpperCase() : validas[0] === 'MANTENER' ? 'MANTENER' : 'NO ENTRAR';
@@ -897,6 +1044,8 @@ export default {
       if (ruta.startsWith('/runner/')) {
         if (!iguales(token(req), env.RUNNER_TOKEN)) return json({ error: 'No autorizado' }, 401);
         if (req.method === 'GET' && ruta === '/runner/config') return runnerConfig(env);
+        // El runner usa la misma lectura de mercados y el mismo modelo que la app.
+        if (req.method === 'GET' && ruta === '/runner/predicciones') return json(await listaMercados());
         if (req.method === 'POST' && ruta === '/runner/reporte') return runnerReporte(env, (await req.json()) as Json);
         return json({ error: 'Ruta no encontrada' }, 404);
       }

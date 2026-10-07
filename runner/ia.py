@@ -158,7 +158,8 @@ def opinar_predicciones(candidatos, posiciones):
         pedido += ("Candidatos para ENTRAR (el modelo les ve ventaja). Para cada uno: COMPRAR o NO ENTRAR.\n"
                    f"{json.dumps(candidatos, ensure_ascii=False)}\n")
     if posiciones:
-        pedido += ("Posiciones que YA tiene el usuario. Para cada una: MANTENER (hasta el vencimiento) o VENDER (cerrar ahora).\n"
+        pedido += ("Posiciones que YA tiene el usuario. Para cada una: MANTENER (hasta el vencimiento), VENDER (cerrar ahora) "
+                   "o COMPRAR MÁS (solo si la señal es fuerte y el precio sigue barato).\n"
                    f"{json.dumps(posiciones, ensure_ascii=False)}\n")
     mensajes = [
         {"role": "system", "content": "Eres un analista prudente de mercados de predicción. Respondes SOLO JSON válido en español."},
@@ -168,11 +169,11 @@ def opinar_predicciones(candidatos, posiciones):
     datos, modelo, error = chat_json(mensajes)
     if datos is None:
         return {}, None, error
-    validas = {"COMPRAR", "NO ENTRAR", "MANTENER", "VENDER"}
+    validas = {"COMPRAR", "NO ENTRAR", "MANTENER", "VENDER", "COMPRAR MÁS"}
     out = {}
     for o in datos.get("opiniones", []) if isinstance(datos, dict) else []:
         try:
-            coin, acc = str(o.get("coin", "")).strip(), str(o.get("accion", "")).upper().strip()
+            coin, acc = str(o.get("coin", "")).strip(), str(o.get("accion", "")).upper().strip().replace("COMPRAR MAS", "COMPRAR MÁS")
             if not re.match(r"^#\d+$", coin) or acc not in validas:
                 continue
             prob = o.get("prob")

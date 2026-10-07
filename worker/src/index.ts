@@ -619,7 +619,7 @@ async function prediccionLibro(url: URL): Promise<Response> {
   const coin = String(url.searchParams.get('coin') || '');
   if (!/^#\d{2,9}$/.test(coin)) return json({ error: 'Mercado inválido' }, 400);
   const d: Json = await hlInfo({ type: 'l2Book', coin });
-  const [compras, ventas] = d.levels || [[], []];
+  const [compras, ventas] = d?.levels || [[], []];
   const nivel = (x: Json | undefined) => (x ? { precio: Number(x.px), unidades: Number(x.sz) } : null);
   return json({ coin, ts: Date.now(), mejor_compra: nivel(compras[0]), mejor_venta: nivel(ventas[0]),
     compras: compras.slice(0, 5).map(nivel), ventas: ventas.slice(0, 5).map(nivel) });
@@ -851,6 +851,96 @@ async function prediccionAnalizar(env: Env, c: Json): Promise<Response> {
   return json(datos);
 }
 
+// «Pedir a la IA» en la pestaña 🎲: el usuario escribe qué quiere y la IA propone
+// órdenes de predicción concretas. Quedan como «propuesta» (el usuario aprueba),
+// con el mejor precio real del libro como límite.
+function relevantes(lista: Json[], instruccion: string): Json[] {
+  const t = instruccion.toLowerCase();
+  const palabras = t.split(/[^a-z0-9áéíóúñ&]+/).filter((w) => w.length >= 3);
+  const quiere = (re: RegExp) => re.test(t);
+  const puntos = (m: Json) => {
+    const txt = `${m.pregunta} ${m.nombre_sub || ''} ${m.subyacente || ''} ${m.categoria}`.toLowerCase();
+    let p = palabras.reduce((a, w) => a + (txt.includes(w) ? 3 : 0), 0);
+    if (quiere(/hoy|corto|ahora|rápid/) && m.plazo === 'hoy') p += 2;
+    if (quiere(/mediano|largo|semana|mes|noviembre|octubre/) && m.plazo === 'mediano') p += 2;
+    if (quiere(/bolsa|acci|índice|indice|oro|plata|petr|s&p|nasdaq/) && m.categoria === 'bolsa') p += 2;
+    if (quiere(/fed|tasa|econom|empresa|ipo|bolsa de valores|anthropic|openai/) && m.categoria === 'economia') p += 2;
+    if (quiere(/cripto|btc|eth|sol|hype|bitcoin/) && m.categoria === 'cripto') p += 2;
+    if (quiere(/ventaja|oportunidad|mejor|barat/)) p += Math.max(0, ...m.lados.map((l: Json) => l.ventaja || 0)) / 5;
+    return p;
+  };
+  return lista.filter((m) => !m.sin_ofertas).map((m) => ({ m, p: puntos(m) })).sort((a, b) => b.p - a.p || (a.m.vence || 9e15) - (b.m.vence || 9e15)).slice(0, 35).map((x) => x.m);
+}
+
+async function prediccionPedir(env: Env, c: Json): Promise<Response> {
+  const instruccion = String(c.instruccion || '').trim().slice(0, 400);
+  if (!instruccion) return json({ error: 'Escribe qué quieres que busque la IA' }, 400);
+  const [config, estado, lista0] = await Promise.all([leerConfig(env), leer<Json>(env, 'estado', {}), listaMercados()]);
+  const lista: Json[] = lista0.mercados || [];
+  const mias: Json[] = estado.ultimo?.predicciones || [];
+  const libre = estado.ultimo?.libre ?? null;
+  const filas = relevantes(lista, instruccion).map((m) => ({ q: m.pregunta, cat: m.categoria === 'cripto' ? `cripto_${m.plazo}` : m.categoria, horas: m.horas,
+    ahora: m.precio_actual ?? undefined, regla: m.regla || undefined,
+    lados: m.lados.map((l: Json) => ({ coin: l.coin, lado: l.nombre, precio: l.precio, modelo_pct: l.prob_modelo ?? undefined, ventaja: l.ventaja ?? undefined })) }));
+  const pos = mias.map((p) => ({ coin: '#' + String(p.coin).slice(1), q: p.pregunta, lado: p.lado_nombre, unidades: p.cantidad, precio: p.precio }));
+  const t0 = Date.now(), ahora = Date.now();
+  let d: Json, modelo: string;
+  try {
+    ({ datos: d, modelo } = await iaChat(env, [
+      { role: 'system', content: 'Preparas órdenes en mercados de predicción de Hyperliquid para un usuario principiante. Prudente: si nada convence, no propongas nada y explícalo. Nunca inventas mercados: usa solo los «coin» de la lista. Respondes SOLO JSON válido en español.' },
+      { role: 'user', content: `El usuario pide: "${instruccion}"
+Cada unidad paga 1 USDC si acierta y 0 si no; el precio es la probabilidad del mercado. «modelo_pct» es un modelo estadístico de volatilidad (no es certeza); «ventaja» = modelo − precio en puntos.
+USDC libres: ${libre ?? 'desconocido'}. Por compra suele usar ${config.pred_monto} USDC (mínimo 10). Tope total en predicciones: ${config.pred_max_total} USDC.
+Sus posiciones: ${JSON.stringify(pos)}
+Mercados abiertos (los más relevantes a su pedido): ${JSON.stringify(filas)}
+Propón como mucho 3 órdenes. COMPRAR lleva "monto_usdc"; VENDER (solo de sus posiciones) lleva "unidades".
+Formato: {"respuesta":"2-4 frases para el usuario","propuestas":[{"coin":"#90170","accion":"COMPRAR","monto_usdc":11,"unidades":null,"confianza":70,"razon":"máx. 25 palabras"}]}` },
+    ]));
+  } catch (e: any) {
+    await bitacora(env, [{ ts: ahora, tipo: 'ia', ok: false, texto: `IA (pedir predicciones) falló: ${String(e.message || e).slice(0, 160)}`, ms: Date.now() - t0 }]);
+    return json({ error: String(e.message || e) }, 502);
+  }
+  const porCoin: Json = {};
+  for (const m of lista) m.lados.forEach((l: Json) => { porCoin[l.coin] = { m, l }; });
+  const ordenes = await leerOrdenes(env), creadas: Json[] = [], descartadas: string[] = [];
+  // Lo que ya tienes en predicciones + compras pendientes: las propuestas no pasan tu tope.
+  let expuesto = mias.reduce((a, p) => a + (Number(p.valor) || 0), 0) + ordenes.filter((o) => PENDIENTE(o) && o.tipo === 'prediccion' && o.accion === 'COMPRAR')
+    .reduce((a, o) => a + Number(o.unidades) * Number(o.limite), 0);
+  for (const x of (Array.isArray(d.propuestas) ? d.propuestas : []).slice(0, 3)) {
+    const coin = String(x.coin || '').trim(), accion = String(x.accion || '').toUpperCase();
+    const ref = porCoin[coin], mia = mias.find((p) => '#' + String(p.coin).slice(1) === coin);
+    if (!ref && !mia) { descartadas.push(`${coin || '?'}: ese mercado no existe o ya cerró`); continue; }
+    if (!['COMPRAR', 'VENDER'].includes(accion)) { descartadas.push(`${coin}: acción inválida`); continue; }
+    if (accion === 'VENDER' && !mia) { descartadas.push(`${coin}: no tienes esa posición para vender`); continue; }
+    const etiqueta = ref ? `${ref.m.pregunta} · ${ref.l.nombre}` : `${mia!.pregunta} · ${mia!.lado_nombre}`;
+    let libro: Json;
+    try { libro = await hlInfo({ type: 'l2Book', coin }); } catch { descartadas.push(`${etiqueta}: no pude leer el libro`); continue; }
+    const nivel = ((libro?.levels || [[], []])[accion === 'COMPRAR' ? 1 : 0] || [])[0];
+    if (!nivel) { descartadas.push(`${etiqueta}: ahora no hay ${accion === 'COMPRAR' ? 'vendedores' : 'compradores'}`); continue; }
+    const px = Number(nivel.px);
+    const monto = Math.min(Math.max(10, Number(x.monto_usdc) || config.pred_monto || 11), config.pred_max_total || 30);
+    const unidades = accion === 'COMPRAR' ? Math.max(1, Math.ceil(monto / px)) : Math.min(Math.floor(mia!.cantidad), Math.max(1, Math.floor(Number(x.unidades) || mia!.cantidad)));
+    if (accion === 'COMPRAR' && expuesto + unidades * px > (config.pred_max_total || 30) + 0.5) {
+      descartadas.push(`${etiqueta}: pasaría tu tope de ${config.pred_max_total} USDC en predicciones (ya usas ${expuesto.toFixed(2)})`); continue;
+    }
+    const v = limpiarPrediccion({}, { coin, accion, unidades, limite: px, etiqueta, razon: String(x.razon || '') }, config);
+    if (!v.orden) { descartadas.push(`${etiqueta}: ${v.error}`); continue; }
+    const conf = Math.max(0, Math.min(100, Number(x.confianza) || 0));
+    const n: Json = { ...v.orden, id: nuevoId('iap'), ts: ahora, origen: 'ia', estado: 'propuesta', confianza: conf,
+      ia: { accion, confianza: conf, razon: String(x.razon || '').slice(0, 240) },
+      vence: Math.min(ahora + 2 * 3600_000, ref?.m.vence || Infinity),
+      historia: [{ ts: ahora, quien: 'ia', texto: `Propuesta al pedirle «${instruccion.slice(0, 80)}»: ${String(x.razon || '').slice(0, 160)}` }] };
+    ordenes.unshift(n);
+    creadas.push(n);
+    if (accion === 'COMPRAR') expuesto += unidades * px;
+  }
+  if (creadas.length) await guardarOrdenes(env, ordenes);
+  await bitacora(env, [{ ts: ahora, tipo: 'ia', ok: true, modelo, ms: Date.now() - t0,
+    texto: `IA (pedir predicciones) respondió con ${modelo} en ${((Date.now() - t0) / 1000).toFixed(1)} s: ${creadas.length} propuesta${creadas.length === 1 ? '' : 's'}` },
+    ...creadas.map((o) => ({ ts: ahora, tipo: 'orden', ok: true, texto: `IA propuso: ${textoOrden(o)} (espera tu aprobación)`, id: o.id }))]);
+  return json({ ok: true, modelo, respuesta: String(d.respuesta || '').slice(0, 800), ordenes: creadas, descartadas });
+}
+
 // ---------------------------------------------------------------- Gráficas
 // Las velas las lee el runner de TU exchange en cada ciclo (1h, 4h y 1d).
 async function graficasApi(env: Env, url: URL): Promise<Response> {
@@ -951,6 +1041,8 @@ async function api(req: Request, env: Env, ruta: string, url: URL): Promise<Resp
       return prediccionGrafica(url).catch((e) => json({ error: `Hyperliquid no respondió: ${String(e?.message || e).slice(0, 120)}` }, 502));
     case 'GET /api/predicciones/libro':
       return prediccionLibro(url).catch((e) => json({ error: `Hyperliquid no respondió: ${String(e?.message || e).slice(0, 120)}` }, 502));
+    case 'POST /api/predicciones/pedir':
+      return prediccionPedir(env, cuerpo).catch((e) => json({ error: `No pude preparar la propuesta: ${String(e?.message || e).slice(0, 120)}` }, 502));
     case 'POST /api/predicciones/analizar':
       return prediccionAnalizar(env, cuerpo).catch(async (e) => {
         await bitacora(env, [{ ts: Date.now(), tipo: 'ia', ok: false, texto: `IA (predicción) falló: ${String(e?.message || e).slice(0, 160)}` }]);

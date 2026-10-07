@@ -27,12 +27,15 @@ const CONFIG_DEFECTO: Json = {
   monto_min: 5, monto_max: 25, rsi_compra: 35, rsi_venta: 68, banda: 3, ganancia_min: 1.5,
   stop_perdida: 0, nunca_vender_con_perdida: true, ia: 'veto', ia_conf_min: 65, max_ops_ciclo: 2,
   marco: '1h', saldo_simulado: 1000, radar_pedidos: [], ordenes_ia: 'proponer', orden_horas: 24,
+  // Beta: la IA revisa los mercados de predicción en cada ciclo.
+  pred_ia: 'proponer', pred_monto: 11, pred_max_total: 30, pred_ventaja: 8,
 };
 
 // Límites duros: la app no puede guardar valores fuera de estos rangos.
 const RANGOS: Record<string, [number, number]> = {
   monto_min: [1, 1000], monto_max: [1, 5000], rsi_compra: [5, 60], rsi_venta: [40, 95], banda: [0, 20],
   ganancia_min: [0, 50], stop_perdida: [0, 50], ia_conf_min: [0, 100], max_ops_ciclo: [0, 10], saldo_simulado: [10, 1000000], orden_horas: [1, 168],
+  pred_monto: [10, 500], pred_max_total: [10, 5000], pred_ventaja: [3, 40],
 };
 
 const CORS = {
@@ -93,6 +96,11 @@ function validarConfig(actual: Json, cambios: Json): { config?: Json; error?: st
     if (!['off', 'proponer', 'auto'].includes(cambios.ordenes_ia)) return { error: 'ordenes_ia inválido' };
     c.ordenes_ia = cambios.ordenes_ia;
   }
+  if (cambios.pred_ia !== undefined) {
+    if (!['off', 'proponer', 'auto'].includes(cambios.pred_ia)) return { error: 'pred_ia inválido' };
+    c.pred_ia = cambios.pred_ia;
+  }
+  if (c.pred_monto > c.pred_max_total) return { error: 'El monto por compra no puede pasar del tope total' };
   if (cambios.nunca_vender_con_perdida !== undefined) c.nunca_vender_con_perdida = Boolean(cambios.nunca_vender_con_perdida);
   if (cambios.objetivo !== undefined) {
     const obj: Json = {};
@@ -213,6 +221,7 @@ function limpiarPrediccion(base: Json, c: Json, config: Json): { orden?: Json; e
   return { orden: o };
 }
 
+const o_tipo = (n: Json) => (n.tipo === 'prediccion' ? 'Predicción · ' : '');
 async function mezclarOrdenes(env: Env, ahora: number, r: Json): Promise<void> {
   const upd: Json[] = Array.isArray(r.ordenes_upd) ? r.ordenes_upd : [];
   const nuevas: Json[] = Array.isArray(r.ordenes_nuevas) ? r.ordenes_nuevas : [];
@@ -237,8 +246,8 @@ async function mezclarOrdenes(env: Env, ahora: number, r: Json): Promise<void> {
     const o: Json = { ...v.orden, id: n.id || nuevoId('ia'), ts: ahora, origen: 'ia', confianza: n.confianza, ia: n.ia || null,
       estado: ['propuesta', 'aprobada', 'ejecutada', 'error'].includes(n.estado) ? n.estado : 'propuesta',
       nota: n.nota || null, error: n.error || null, resultado: n.resultado || null,
-      vence: ahora + (config.orden_horas || 24) * 3600_000,
-      historia: [{ ts: ahora, quien: 'ia', texto: `Propuesta con ${n.confianza}% de confianza: ${n.razon || ''}`.trim() }] };
+      vence: Math.min(ahora + (config.orden_horas || 24) * 3600_000, Number(n.caduca) > ahora ? Number(n.caduca) : Infinity),
+      historia: [{ ts: ahora, quien: 'ia', texto: `${o_tipo(n)}Propuesta con ${n.confianza}% de confianza: ${n.razon || ''}`.trim() }] };
     lista.unshift(o);
     cambio = true;
     eventos.push({ tipo: 'orden', ok: o.estado !== 'error', texto: `IA ${o.estado === 'ejecutada' ? 'ejecutó' : 'propuso'}: ${textoOrden(o)}`, id: o.id });
@@ -561,6 +570,38 @@ async function prediccionLibro(url: URL): Promise<Response> {
   return json({ coin, ts: Date.now(), mejor_compra: nivel(compras[0]), mejor_venta: nivel(ventas[0]),
     compras: compras.slice(0, 5).map(nivel), ventas: ventas.slice(0, 5).map(nivel) });
 }
+// Gráficas para decidir: probabilidad del lado (velas 15 min, 48 h) y precio del
+// subyacente en 1H/4H/1D con la línea del objetivo. Datos públicos de Hyperliquid.
+const graficaPredMem = new Map<string, { ts: number; datos: Json }>();
+async function prediccionGrafica(url: URL): Promise<Response> {
+  const coin = String(url.searchParams.get('coin') || '').replace(/^\+/, '#');
+  if (!/^#\d{2,9}$/.test(coin)) return json({ error: 'Mercado inválido' }, 400);
+  const mem = graficaPredMem.get(coin);
+  if (mem && Date.now() - mem.ts < 60_000) return json({ ...mem.datos, cache: true });
+  const cod = Number(coin.slice(1)), mercado = Math.floor(cod / 10), lado = cod % 10;
+  const lista: Json[] = (mercadosMem && Date.now() - mercadosMem.ts < 300_000 ? mercadosMem.datos.mercados : null) || (await (await prediccionMercados()).json() as Json).mercados || [];
+  const m = lista.find((x) => x.mercado === mercado);
+  if (!m) return json({ error: 'Ese mercado ya no está abierto.' }, 404);
+  const ahora = Date.now(), ld = m.lados[lado] || {};
+  const velas = async (c: string, intervalo: string, horas: number) => {
+    try {
+      const v: Json[] = await hlInfo({ type: 'candleSnapshot', req: { coin: c, interval: intervalo, startTime: ahora - horas * 3_600_000, endTime: ahora } });
+      return { t: v.map((x) => Number(x.t)), c: v.map((x) => Number(x.c)) };
+    } catch { return { t: [], c: [] }; }
+  };
+  const [prob, h1, h4, d1] = await Promise.all([
+    velas(coin, '15m', 48),
+    m.subyacente ? velas(m.subyacente, '1h', 100) : null,
+    m.subyacente ? velas(m.subyacente, '4h', 400) : null,
+    m.subyacente ? velas(m.subyacente, '1d', 2400) : null,
+  ]);
+  const datos: Json = { coin, mercado, lado, pregunta: m.pregunta, lado_nombre: ld.nombre, precio_lado: ld.precio ?? null, ventaja: ld.ventaja ?? null,
+    prob_modelo: m.prob_modelo != null ? (lado === 0 ? m.prob_modelo : Math.round((100 - m.prob_modelo) * 10) / 10) : null,
+    subyacente: m.subyacente, objetivo: m.objetivo, precio_actual: m.precio_actual ?? null, vence: m.vence, ts: ahora, prob,
+    marcos: m.subyacente ? { '1h': h1, '4h': h4, '1d': d1 } : null };
+  graficaPredMem.set(coin, { ts: ahora, datos });
+  return json(datos);
+}
 let mercadosMem: { ts: number; datos: Json } | null = null;
 async function prediccionMercados(): Promise<Response> {
   if (mercadosMem && Date.now() - mercadosMem.ts < 60_000) return json({ ...mercadosMem.datos, cache: true });
@@ -759,6 +800,8 @@ async function api(req: Request, env: Env, ruta: string, url: URL): Promise<Resp
       return json({ items: await leer<Json[]>(env, 'bitacora', []) });
     case 'GET /api/predicciones/mercados':
       return prediccionMercados().catch((e) => json({ error: `Hyperliquid no respondió: ${String(e?.message || e).slice(0, 120)}` }, 502));
+    case 'GET /api/predicciones/grafica':
+      return prediccionGrafica(url).catch((e) => json({ error: `Hyperliquid no respondió: ${String(e?.message || e).slice(0, 120)}` }, 502));
     case 'GET /api/predicciones/libro':
       return prediccionLibro(url).catch((e) => json({ error: `Hyperliquid no respondió: ${String(e?.message || e).slice(0, 120)}` }, 502));
     case 'POST /api/predicciones/analizar':

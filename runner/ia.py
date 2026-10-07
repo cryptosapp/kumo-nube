@@ -144,3 +144,40 @@ def opinar(propuestas, contexto, vigilar=None):
         except (AttributeError, TypeError, ValueError):
             continue
     return out, modelo, None
+
+
+def opinar_predicciones(candidatos, posiciones):
+    """La IA revisa mercados de predicción con ventaja según el modelo y tus
+    posiciones. Devuelve ({"#N": {accion, confianza, prob, razon}}, modelo, error)."""
+    if not candidatos and not posiciones:
+        return {}, None, None
+    pedido = ("Mercados de predicción de Hyperliquid: cada unidad paga 1 USDC si acierta y 0 si no; el precio es la "
+              "probabilidad que da el mercado. «prob_modelo_pct» sale de un modelo log-normal con la volatilidad de 48 h "
+              "(no es certeza). Sé escéptico: el modelo ignora noticias y el mercado puede saber algo más.\n")
+    if candidatos:
+        pedido += ("Candidatos para ENTRAR (el modelo les ve ventaja). Para cada uno: COMPRAR o NO ENTRAR.\n"
+                   f"{json.dumps(candidatos, ensure_ascii=False)}\n")
+    if posiciones:
+        pedido += ("Posiciones que YA tiene el usuario. Para cada una: MANTENER (hasta el vencimiento) o VENDER (cerrar ahora).\n"
+                   f"{json.dumps(posiciones, ensure_ascii=False)}\n")
+    mensajes = [
+        {"role": "system", "content": "Eres un analista prudente de mercados de predicción. Respondes SOLO JSON válido en español."},
+        {"role": "user", "content": pedido + 'Para cada «coin» da confianza 0-100, tu probabilidad de que ESE lado acierte (prob 0-100) y una razón breve (máx. 20 palabras).\n'
+                                             'Formato: {"opiniones":[{"coin":"#90170","accion":"NO ENTRAR","confianza":60,"prob":55,"razon":"..."}]}'},
+    ]
+    datos, modelo, error = chat_json(mensajes)
+    if datos is None:
+        return {}, None, error
+    validas = {"COMPRAR", "NO ENTRAR", "MANTENER", "VENDER"}
+    out = {}
+    for o in datos.get("opiniones", []) if isinstance(datos, dict) else []:
+        try:
+            coin, acc = str(o.get("coin", "")).strip(), str(o.get("accion", "")).upper().strip()
+            if not re.match(r"^#\d+$", coin) or acc not in validas:
+                continue
+            prob = o.get("prob")
+            out[coin] = {"accion": acc, "confianza": max(0, min(100, int(float(o.get("confianza", 0) or 0)))),
+                         "prob": max(0.0, min(100.0, float(prob))) if prob not in (None, "") else None, "razon": str(o.get("razon", ""))[:200]}
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return out, modelo, None

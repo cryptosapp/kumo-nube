@@ -7,6 +7,10 @@ Por defecto nunca vende con pérdida.
 """
 
 CONFIG_DEFECTO = {
+    "pred_ia": "proponer",          # predicciones (beta): off | proponer | auto
+    "pred_monto": 11.0,             # USDC por compra de la IA (Hyperliquid pide ~10 mínimo)
+    "pred_max_total": 30.0,         # tope: valor en predicciones + compras pendientes
+    "pred_ventaja": 8.0,            # puntos de ventaja del modelo para considerar un mercado
     "modo": "simulacion",          # simulacion | real
     "pausado": False,
     "quote": "USDT",

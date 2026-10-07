@@ -8,6 +8,7 @@ Variables de entorno (secretos de tu repositorio de GitHub):
   kumo.json (lo escribe el workflow de instalación) o de KUMO_URL.
 """
 import json
+import math
 import os
 import sys
 import time
@@ -192,15 +193,37 @@ def ciclo(remoto):
                 errores.append(f"{p['accion']} {sym}: {e}")
                 fallidas[(sym, p["accion"])] = str(e)[:160]
 
-    precios_fin = dict(precios)
-    total, activos = E.valorar(saldos, precios_fin, quote)
-    # Mercados de predicción de Hyperliquid de tu cuenta real (solo se muestran y valoran).
-    preds = []
-    if clave and getattr(base, "predicciones", None):
+    # Mercados de predicción de Hyperliquid de tu cuenta real.
+    def describir_preds():
+        if not (clave and getattr(base, "predicciones", None)):
+            return []
         try:
-            preds = PR.describir(base.predicciones, base._info_hl)
+            return PR.describir(base.predicciones, base._info_hl)
         except Exception as e:  # nunca deben tumbar el ciclo
             notas.append(f"Predicciones: {type(e).__name__}")
+            return []
+    preds = describir_preds()
+
+    # 3) Beta: la IA revisa los mercados de predicción y tus posiciones en cada ciclo
+    #    y propone órdenes (o las ejecuta si activaste «IA ejecuta sola»).
+    pred_ia = None
+    if not simulado and exchange_id == "hyperliquid" and cfg["ia"] != "off" and cfg.get("pred_ia", "proponer") != "off" and hasattr(base, "_info_hl"):
+        nuevas_p, pred_ia = predicciones_ia(base, ex, cfg, preds, pendientes, saldos.get(quote, 0.0), notas)
+        for o in nuevas_p:
+            if cfg.get("pred_ia") == "auto" and not cfg["pausado"]:
+                o["estado"] = "aprobada"
+                upd, op = O.ejecutar_prediccion(ex, o, simulado)
+                o.update({k: v for k, v in upd.items() if k != "id"})
+                if op:
+                    ejecutadas.append(op)
+                    saldos = ex.saldos()
+                    preds = describir_preds()
+                elif upd.get("error"):
+                    errores.append(f"IA predicción {o['accion']} {o['etiqueta']}: {upd['error']}")
+        nuevas += nuevas_p
+
+    precios_fin = dict(precios)
+    total, activos = E.valorar(saldos, precios_fin, quote)
     valor_preds = round(sum(p["valor"] or 0 for p in preds), 2)
     if not simulado and valor_preds:
         total = round(total + valor_preds, 2)
@@ -237,8 +260,43 @@ def ciclo(remoto):
         "ordenes_upd": ordenes_upd, "ordenes_nuevas": nuevas, "ia_log": ia.LOG[-20:],
         "ordenes": ordenes_ia(propuestas, bloqueadas, ejecutadas, fallidas, cfg["pausado"], opiniones),
         "graficas": graf,
-        "predicciones": preds, "valor_predicciones": valor_preds,
+        "predicciones": preds, "valor_predicciones": valor_preds, "pred_ia": pred_ia,
     }
+
+
+def predicciones_ia(base, ex, cfg, preds, pendientes, libre, notas):
+    """Pide a la IA sus órdenes de predicción y les pone el mejor precio REAL del
+    libro (no el precio medio, que casi nunca se llena). Devuelve (órdenes, resumen)."""
+    try:
+        lista = PR.mercados(base._info_hl)
+        nuevas, notas_p, resumen = PR.proponer(cfg, lista, preds, pendientes, libre, ia.opinar_predicciones)
+    except Exception as e:  # nunca debe tumbar el ciclo
+        notas.append(f"IA predicciones: {type(e).__name__}")
+        return [], None
+    notas += notas_p
+    margen = float(cfg.get("pred_ventaja") or 8) / 200  # la mitad de la ventaja pedida
+    listas = []
+    for i, o in enumerate(nuevas):
+        compra = o["accion"] == "COMPRAR"
+        mejor = base.mejor_precio_prediccion(int(o["coin"][1:]), compra)
+        if not mejor or not mejor.get("precio"):
+            notas.append(f"Predicciones: la IA quería {'comprar' if compra else 'vender'} «{o['etiqueta']}» pero no hay {'vendedores' if compra else 'compradores'} ahora")
+            continue
+        p = mejor["precio"]
+        if compra and (p > o["precio_modelo"] - margen or p > o["limite"] + 0.05):
+            notas.append(f"Predicciones: «{o['etiqueta']}» se vende a {p:g} en el libro: ya no tiene ventaja, no la propongo")
+            continue
+        if not compra and p < o["limite"] - 0.08:
+            notas.append(f"Predicciones: la IA sugiere vender «{o['etiqueta']}» pero el mejor comprador solo paga {p:g}")
+            continue
+        if compra:
+            o["unidades"] = max(1, math.ceil(o.pop("monto") / p))
+        o.pop("precio_modelo", None)
+        o.pop("monto", None)
+        o.update({"limite": float(f"{p:.5g}"), "id": f"iap{int(time.time())}{i}", "estado": "propuesta",
+                  "caduca": int(time.time() * 1000) + 2 * 3_600_000})  # el precio cambia rápido: caduca en 2 h
+        listas.append(o)
+    return listas, resumen
 
 
 def ordenes_ia(propuestas, bloqueadas, ejecutadas, fallidas, pausado, opiniones):

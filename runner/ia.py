@@ -31,7 +31,7 @@ CATALOGO = {
     "openrouter": {"url": "https://openrouter.ai/api/v1"},
     "cerebras": {"url": "https://api.cerebras.ai/v1", "json": "objeto"},
     "mistral": {"url": "https://api.mistral.ai/v1", "json": "objeto"},
-    "kilo": {"url": "https://api.kilo.ai/api/gateway", "sin_clave": True, "max_tokens": 1500},
+    "kilo": {"url": "https://api.kilo.ai/api/gateway", "sin_clave": True, "max_tokens": 4096},
     "llm7": {"url": "https://api.llm7.io/v1", "sin_clave": True},
     "ovh": {"url": "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1", "sin_clave": True},
 }
@@ -129,6 +129,13 @@ def _cuerpo(url, modelo, mensajes, formato_json):
     return datos
 
 
+def _json_completo(texto):
+    try:
+        return extraer_json(texto or "") is not None
+    except ValueError:
+        return False
+
+
 def _llamar(url, clave, modelo, mensajes, formato_json=True):
     datos = _cuerpo(url, modelo, mensajes, formato_json)
     # Groq bloquea (error 1010) los user-agent que no parecen de una herramienta conocida.
@@ -138,7 +145,11 @@ def _llamar(url, clave, modelo, mensajes, formato_json=True):
     req = urllib.request.Request(url + "/chat/completions", data=json.dumps(datos).encode(), method="POST", headers=cab)
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
         resp = json.loads(r.read().decode())
-    contenido = ((resp.get("choices") or [{}])[0].get("message") or {}).get("content")
+    eleccion = (resp.get("choices") or [{}])[0]
+    contenido = (eleccion.get("message") or {}).get("content")
+    # Los modelos que razonan pueden gastar todos los tokens antes de escribir la respuesta.
+    if eleccion.get("finish_reason") == "length" and not _json_completo(contenido):
+        raise ValueError("se cortó (límite de tokens)")
     if not contenido or not str(contenido).strip():
         raise ValueError("respuesta vacía")
     return contenido
@@ -160,7 +171,7 @@ def _explicar(e):
     if isinstance(e, TimeoutError) or "timed out" in str(e):
         return "timeout"
     if isinstance(e, ValueError):
-        return "respuesta vacía" if "vacía" in str(e) else "JSON inválido"
+        return next((m for m in ("respuesta vacía", "se cortó (límite de tokens)") if m in str(e)), "JSON inválido")
     return type(e).__name__
 
 
@@ -316,6 +327,23 @@ def decidir(mensajes, leer, espera):
             porclave.setdefault(k, []).append((modelo, v))
     out = {k: votar(vs, espera(k)) for k, vs in porclave.items()}
     return out, "consenso:" + "+".join(corto(m) for m, _ in ok), None
+
+
+def varias_json(mensajes, valido=lambda d: True):
+    """Como `decidir`, pero devuelve las respuestas crudas para que quien llama las combine:
+    ([(modelo, datos)], error). Con consenso apagado o una sola IA, una respuesta (cadena)."""
+    if not CONSENSO["enabled"] or len(_candidatos()) < 2:
+        datos, modelo, error = chat_json(mensajes)
+        if datos is None:
+            return [], error
+        return ([(modelo, datos)], None) if valido(datos) else ([], f"{corto(modelo)}: formato inválido")
+    ok, errores = consultar_varias(mensajes, CONSENSO["size"], valido)
+    for e in errores:
+        if e["error"] == "formato inválido":
+            LOG.append({"ts": int(time.time() * 1000), "proveedor": e["proveedor"], "modelo": e["modelo"], "ok": False, "ms": 0, "error": "formato inválido (no se contó su voto)"})
+    if not ok:
+        return [], "Ninguna IA respondió: " + "; ".join(f"{e['proveedor']} {corto(e['modelo'])}: {e['error']}" for e in errores[:4])
+    return ok, None
 
 
 def _filas(datos, clave):

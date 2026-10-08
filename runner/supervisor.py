@@ -6,6 +6,7 @@ de sus rangos, y el dinero solo puede BAJARLO: el monto por compra y el tope tot
 nunca pasan de lo que el usuario puso («techo»). Nunca cambia el modo (apagada /
 propone / ejecuta sola) ni el modo real. La nube vuelve a validar todo.
 """
+import statistics
 import time
 
 CADA_HORAS = 6
@@ -56,8 +57,27 @@ def limpiar(cfg, cambios):
     return out
 
 
-def revisar(cfg, ordenes, posiciones, resumen, chat_json):
-    """Devuelve {"ts", "cambios", "razon", "modelo"} (cambios puede venir vacío) o None si la IA falla."""
+def unir(cfg, respuestas):
+    """Varias IAs revisan: un parámetro cambia solo si más de la mitad lo quiere cambiar,
+    y al valor mediano de lo que propusieron (las categorías: solo las que todas ellas
+    dejan). Todo vuelve a pasar por `limpiar`. Devuelve (cambios, a_favor por clave)."""
+    propuestas = [limpiar(cfg, d.get("cambios")) for d in respuestas]
+    out, apoyo = {}, {}
+    for k in {k for p in propuestas for k in p}:
+        vals = [p[k] for p in propuestas if k in p]
+        if len(vals) * 2 <= len(respuestas):
+            continue
+        apoyo[k] = len(vals)
+        if k == "pred_categorias":
+            out[k] = sorted(set.intersection(*(set(v) for v in vals)))
+        else:
+            out[k] = statistics.median(vals)
+    return limpiar(cfg, out), apoyo
+
+
+def revisar(cfg, ordenes, posiciones, resumen, varias_json):
+    """Devuelve {"ts", "cambios", "razon", "modelo"} (cambios puede venir vacío) o None si la IA falla.
+    `varias_json(mensajes, valido)` → ([(modelo, datos)], error): con consenso, varias IAs."""
     actual = {k: cfg.get(k) for k in list(AJUSTABLES) + ["pred_categorias"]}
     techos = {k: cfg.get(t) or cfg.get(k) for k, t in TECHOS.items()}
     hist = [{k: o.get(k) for k in ("ts", "accion", "etiqueta", "unidades", "limite", "estado", "origen", "error", "resultado")} for o in (ordenes or [])][:20]
@@ -81,7 +101,15 @@ def revisar(cfg, ordenes, posiciones, resumen, chat_json):
             'Formato: {"cambios":{"pred_ventaja":10},"razon":"máx. 40 palabras"}'
         )},
     ]
-    datos, modelo, error = chat_json(mensajes)
-    if datos is None or not isinstance(datos, dict):
+    ok, error = varias_json(mensajes, lambda d: isinstance(d, dict) and isinstance(d.get("cambios", {}), dict))
+    if not ok:
         return None
-    return {"ts": int(time.time() * 1000), "cambios": limpiar(cfg, datos.get("cambios")), "razon": str(datos.get("razon") or "")[:300], "modelo": modelo}
+    if len(ok) == 1:
+        modelo, datos = ok[0]
+        return {"ts": int(time.time() * 1000), "cambios": limpiar(cfg, datos.get("cambios")), "razon": str(datos.get("razon") or "")[:300], "modelo": modelo}
+    cambios, apoyo = unir(cfg, [d for _, d in ok])
+    corto = lambda m: str(m).split("/")[-1].replace(":free", "")
+    detalle = ", ".join(f"{corto(m)}: {', '.join(sorted(limpiar(cfg, d.get('cambios')))) or 'sin cambios'}" for m, d in ok)
+    razones = " | ".join(str(d.get("razon") or "")[:90] for _, d in ok)
+    return {"ts": int(time.time() * 1000), "cambios": cambios, "razon": f"Consenso de {len(ok)} IAs ({detalle}). {razones}"[:300],
+            "modelo": "consenso:" + "+".join(corto(m) for m, _ in ok)}

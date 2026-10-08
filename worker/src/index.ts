@@ -638,7 +638,7 @@ async function candidatosIA(env: Env): Promise<{ prov: Json; modelo: string }[]>
 // Una pregunta a un proveedor, con lo suyo de cada uno.
 function cuerpoIA(prov: Json, modelo: string, mensajes: Json[], formatoJson: boolean): Json {
   const id = IA_CATALOGO.find((c) => String(prov.url).startsWith(c.url))?.id;
-  const c: Json = { model: modelo, messages: mensajes, temperature: 0.2, max_tokens: id === 'kilo' ? 1500 : 2048 };
+  const c: Json = { model: modelo, messages: mensajes, temperature: 0.2, max_tokens: id === 'kilo' ? 4096 : 2048 }; // Kilo: modelos que razonan mucho antes de responder
   if (formatoJson) {
     if (id === 'groq' && !/llama/i.test(modelo)) { c.response_format = { type: 'json_schema', json_schema: { name: 'respuesta', strict: false, schema: { type: 'object' } } }; c.reasoning_effort = 'low'; }
     else if (id === 'groq' || id === 'mistral' || id === 'cerebras') c.response_format = { type: 'json_object' };
@@ -664,8 +664,10 @@ async function preguntarIA(prov: Json, modelo: string, mensajes: Json[], ms: num
     if (r.ok) {
       const d: any = await r.json().catch(() => ({}));
       const texto = d.choices?.[0]?.message?.content || '';
-      if (!String(texto).trim()) return { ok: false, status: 200, error: 'respuesta vacía' };
-      try { return { ok: true, datos: extraerJson(texto) }; } catch { return { ok: false, status: 200, error: 'JSON inválido' }; }
+      // Los modelos que razonan pueden gastar todos los tokens antes de escribir la respuesta.
+      const cortada = d.choices?.[0]?.finish_reason === 'length';
+      if (!String(texto).trim()) return { ok: false, status: 200, error: cortada ? 'se cortó (límite de tokens)' : 'respuesta vacía' };
+      try { return { ok: true, datos: extraerJson(texto) }; } catch { return { ok: false, status: 200, error: cortada ? 'se cortó (límite de tokens)' : 'JSON inválido' }; }
     }
     // Gemini responde 400 si la clave no sirve.
     if (r.status === 400 && formatoJson && !String(prov.url).includes('generativelanguage')) continue;
@@ -849,6 +851,56 @@ async function iaChat(env: Env, mensajes: Json[], solo?: { prov: Json; modelo: s
   }
   const u = respaldo[respaldo.length - 1];
   throw new Error(u ? `${u.proveedor} ${u.error} con ${u.modelo}` : 'La IA no respondió');
+}
+
+// Consenso en la nube (igual que en el ciclo): hasta `size` IAs en paralelo, primero un
+// modelo de cada proveedor; si responde menos de la mitad, sigue una a una. Una respuesta
+// sin formato útil (`valido`) no cuenta y entra la siguiente.
+async function iaVarias(env: Env, config: Json, mensajes: Json[], valido: (d: Json) => boolean): Promise<{ votos: { datos: Json; modelo: string; proveedor: string }[]; errores: Json[] }> {
+  const cands = await candidatosIA(env);
+  if (!cands.length) throw new Error('Tu nube no tiene IA configurada: agrega un proveedor en Config → IA');
+  // Sin consenso (o con un solo proveedor) basta 1 respuesta válida: es la cadena de respaldo.
+  const solo = !config.ia_consenso?.enabled || new Set(cands.map((c) => c.prov.id)).size < 2;
+  const n = solo ? 1 : Math.max(2, Math.min(5, Number(config.ia_consenso?.size) || 3));
+  const vistos = new Set<string>(), primero: typeof cands = [], resto: typeof cands = [];
+  for (const c of cands) { (vistos.has(c.prov.id) ? resto : primero).push(c); vistos.add(c.prov.id); }
+  const cola = solo ? cands : [...primero, ...resto], votos: { datos: Json; modelo: string; proveedor: string }[] = [], errores: Json[] = [], caidos = new Set<string>();
+  const anotar = (c: { prov: Json; modelo: string }, r: { ok: boolean; datos?: Json; status?: number; error?: string }) => {
+    if (r.ok && valido(r.datos!)) votos.push({ datos: r.datos!, modelo: c.modelo, proveedor: c.prov.id });
+    else {
+      errores.push({ proveedor: c.prov.id, modelo: c.modelo, error: r.ok ? 'formato inválido (no se contó su voto)' : r.error });
+      if ((r.status === 401 || r.status === 403) && c.prov.key) caidos.add(c.prov.id);
+    }
+  };
+  const primeras = cola.slice(0, n), t0 = Date.now();
+  (await Promise.all(primeras.map((c) => preguntarIA(c.prov, c.modelo, mensajes, 45_000)))).forEach((r, i) => anotar(primeras[i], r));
+  // Tope de intentos extra: el plan gratis permite 50 subpeticiones por petición.
+  for (const c of cola.slice(n, solo ? undefined : n + 6)) {
+    if (votos.length * 2 >= n) break;
+    // Es un botón de la app: con un voto ya en mano no se hace esperar más de ~40 s.
+    if (votos.length && Date.now() - t0 > 40_000) break;
+    if (caidos.has(c.prov.id)) continue;
+    anotar(c, await preguntarIA(c.prov, c.modelo, mensajes, 45_000));
+  }
+  if (!votos.length) {
+    const u = errores.slice(0, 4).map((e) => `${e.proveedor} ${corto(e.modelo)}: ${e.error}`).join('; ');
+    throw new Error(`Ninguna IA respondió: ${u || 'sin respuesta'}`);
+  }
+  return { votos, errores };
+}
+const corto = (m: string) => String(m).split('/').pop()!.replace(':free', '');
+const mediana = (xs: number[]) => { const a = [...xs].sort((x, y) => x - y), k = a.length >> 1; return a.length % 2 ? a[k] : (a[k - 1] + a[k]) / 2; };
+// Etiqueta del modelo como en el ciclo: «consenso:a+b» o el modelo solo.
+const etiquetaVotos = (votos: { modelo: string }[]) => votos.length > 1 ? 'consenso:' + votos.map((v) => corto(v.modelo)).join('+') : votos[0].modelo;
+// Suma de confianza por opción (mínimo 0.01 por voto); empate → `espera`. Confianza final =
+// media de quienes votaron la ganadora × (0.5 + 0.5 × acuerdo).
+function votarOpciones(votos: { modelo: string; opcion: string; confianza: number }[], espera: string): { opcion: string; confianza: number; a_favor: number } {
+  const suma: Record<string, number> = {};
+  for (const v of votos) suma[v.opcion] = (suma[v.opcion] || 0) + Math.max(0.01, v.confianza);
+  const mejor = Math.max(...Object.values(suma)), gan = Object.keys(suma).filter((k) => Math.abs(suma[k] - mejor) < 1e-9);
+  const opcion = gan.length === 1 ? gan[0] : espera, favor = votos.filter((v) => v.opcion === opcion);
+  const media = favor.length ? favor.reduce((a, v) => a + v.confianza, 0) / favor.length : 0;
+  return { opcion, confianza: Math.round(media * (0.5 + 0.5 * favor.length / votos.length)), a_favor: favor.length };
 }
 
 async function radarAnalizar(env: Env, cuerpo: Json): Promise<Response> {
@@ -1233,27 +1285,43 @@ async function prediccionAnalizar(env: Env, c: Json): Promise<Response> {
     ? `El usuario mira este mercado completo y quiere saber si comprar un lado. Sugiere UNA acción: COMPRAR con "lado" = ${nombres.map((n) => `"${n}"`).join(' o ')}, o NO ENTRAR (lado null).${mercado.ya_tienes ? ' Ya tiene posición en este mercado: tenlo en cuenta.' : ''}`
     : mercado.tiene_posicion ? 'Sugiere UNA acción: MANTENER (esperar al vencimiento), VENDER (cerrar ahora al precio del mercado) o COMPRAR MÁS.' : 'El usuario aún NO tiene posición en este lado: sugiere COMPRAR (entrar en este lado) o NO ENTRAR.';
   const t0 = Date.now();
-  const { datos: d, modelo } = await iaChat(env, [
-    { role: 'system', content: 'Eres un analista prudente de mercados de predicción. Explicas a un principiante en español sencillo. No prometes resultados. Respondes SOLO JSON válido.' },
-    { role: 'user', content: `Mercado de predicción de Hyperliquid (cada unidad paga 1 si acierta y 0 si no; el precio es la probabilidad que le da el mercado):\n${JSON.stringify(mercado)}\nMercado global ahora: ${global ? JSON.stringify({ resumen: global.resumen, tono: global.tono, turbulencia: global.turbulencia }) : 'sin datos'}\n` +
-      `Lee la regla. Si depende de un precio, compara precio actual con objetivo, el tiempo que queda y cuánto se mueve: «movimiento_tipico_pct» es 1 desviación en 1 h, 24 h y 48 h; «movimiento_esperado_hasta_vencer_pct» es la que usa el modelo hasta el vencimiento; si el régimen es «turbulento», la última hora se mueve mucho más que lo normal. Ten en cuenta el mercado global (tono de riesgo, refugio, turbulencia) y la tendencia de 1 h / 24 h / 48 h. Si es un evento (economía, empresas), usa lo que sepas y di claramente si tu información puede estar desactualizada. Compara tu probabilidad con la del mercado. ${pide}\n` +
-      `Formato: {"sugerencia":"${ambos ? 'COMPRAR|NO ENTRAR' : 'MANTENER|VENDER|COMPRAR MÁS|COMPRAR|NO ENTRAR'}",${ambos ? '"lado":"' + (nombres[0] || 'Sí') + '",' : ''}"confianza":0-100,"prob_estimada":0-100,"analisis":"2-4 frases","riesgos":["..."]}${ambos ? ' (prob_estimada = probabilidad de que el lado sugerido acierte; si NO ENTRAR, la de «' + (nombres[0] || 'Sí') + '»)' : ''}` },
-  ]);
-  let sug: string, ladoSug: number | null = null;
-  if (ambos) {
-    const i = nombres.findIndex((n) => n.toLowerCase() === String(d.lado || '').trim().toLowerCase() || (n === 'Sí' && /^s[ií]$|^yes$/i.test(String(d.lado || '').trim())));
-    sug = String(d.sugerencia).toUpperCase() === 'COMPRAR' && i >= 0 ? 'COMPRAR' : 'NO ENTRAR';
-    if (sug === 'COMPRAR') ladoSug = i;
-  } else {
-    const validas = mercado.tiene_posicion ? ['MANTENER', 'VENDER', 'COMPRAR MÁS'] : ['COMPRAR', 'NO ENTRAR'];
-    sug = validas.includes(String(d.sugerencia).toUpperCase()) ? String(d.sugerencia).toUpperCase() : validas[0] === 'MANTENER' ? 'MANTENER' : 'NO ENTRAR';
-  }
+  const config = await leerConfig(env);
+  // Cada IA da su sugerencia; se vota como en el ciclo (suma de confianza, empate → no hacer nada).
+  const validas = ambos ? null : mercado.tiene_posicion ? ['MANTENER', 'VENDER', 'COMPRAR MÁS'] : ['COMPRAR', 'NO ENTRAR'];
+  const espera = mercado.tiene_posicion ? 'MANTENER' : 'NO ENTRAR';
+  const leerSug = (d: Json): { opcion: string; lado: number | null } | null => {
+    const s0 = String(d?.sugerencia || '').toUpperCase().trim().replace('COMPRAR MAS', 'COMPRAR MÁS');
+    if (ambos) {
+      if (s0 === 'NO ENTRAR') return { opcion: 'NO ENTRAR', lado: null };
+      const i = nombres.findIndex((n) => n.toLowerCase() === String(d.lado || '').trim().toLowerCase() || (n === 'Sí' && /^s[ií]$|^yes$/i.test(String(d.lado || '').trim())));
+      return s0 === 'COMPRAR' && i >= 0 ? { opcion: `COMPRAR ${nombres[i].toUpperCase()}`, lado: i } : null;
+    }
+    return validas!.includes(s0) ? { opcion: s0, lado: null } : null;
+  };
+  const { votos } = await iaVarias(env, config, [
+      { role: 'system', content: 'Eres un analista prudente de mercados de predicción. Explicas a un principiante en español sencillo. No prometes resultados. Respondes SOLO JSON válido.' },
+      { role: 'user', content: `Mercado de predicción de Hyperliquid (cada unidad paga 1 si acierta y 0 si no; el precio es la probabilidad que le da el mercado):\n${JSON.stringify(mercado)}\nMercado global ahora: ${global ? JSON.stringify({ resumen: global.resumen, tono: global.tono, turbulencia: global.turbulencia }) : 'sin datos'}\n` +
+        `Lee la regla. Si depende de un precio, compara precio actual con objetivo, el tiempo que queda y cuánto se mueve: «movimiento_tipico_pct» es 1 desviación en 1 h, 24 h y 48 h; «movimiento_esperado_hasta_vencer_pct» es la que usa el modelo hasta el vencimiento; si el régimen es «turbulento», la última hora se mueve mucho más que lo normal. Ten en cuenta el mercado global (tono de riesgo, refugio, turbulencia) y la tendencia de 1 h / 24 h / 48 h. Si es un evento (economía, empresas), usa lo que sepas y di claramente si tu información puede estar desactualizada. Compara tu probabilidad con la del mercado. ${pide}\n` +
+        `Formato: {"sugerencia":"${ambos ? 'COMPRAR|NO ENTRAR' : 'MANTENER|VENDER|COMPRAR MÁS|COMPRAR|NO ENTRAR'}",${ambos ? '"lado":"' + (nombres[0] || 'Sí') + '",' : ''}"confianza":0-100,"prob_estimada":0-100,"analisis":"2-4 frases","riesgos":["..."]}${ambos ? ' (prob_estimada = probabilidad de que el lado sugerido acierte; si NO ENTRAR, la de «' + (nombres[0] || 'Sí') + '»)' : ''}` },
+  ], (d) => leerSug(d) != null);
+  const filas = votos.map((v) => ({ ...v, ...leerSug(v.datos)!, confianza: Math.max(0, Math.min(100, Number(v.datos.confianza) || 0)),
+    prob: Number.isFinite(Number(v.datos.prob_estimada)) && v.datos.prob_estimada !== null && v.datos.prob_estimada !== '' ? Math.max(0, Math.min(100, Number(v.datos.prob_estimada))) : null }));
+  const r = filas.length > 1 ? votarOpciones(filas, espera) : { opcion: filas[0].opcion, confianza: filas[0].confianza, a_favor: 1 };
+  const favor = filas.filter((f) => f.opcion === r.opcion);
+  const lider = (favor.length ? favor : filas).reduce((a, f) => (f.confianza > a.confianza ? f : a));
+  const d = lider.datos, modelo = etiquetaVotos(votos);
+  const ladoSug = favor.length ? favor[0].lado : null, sug = r.opcion;
+  // Probabilidad: mediana de quienes votaron la opción ganadora (misma pregunta, mismo lado).
+  const probs = favor.map((f) => f.prob).filter((x): x is number => x != null);
+  const detalle = filas.length > 1 ? `Consenso ${r.a_favor}/${filas.length} (${filas.map((f) => `${corto(f.modelo)} ${f.opcion} ${f.confianza}`).join(', ')}). ` : '';
+  const riesgos = [...new Set([lider, ...favor, ...filas].flatMap((f) => (Array.isArray(f.datos.riesgos) ? f.datos.riesgos : []).map((x: unknown) => String(x).slice(0, 160))))];
   const datos: Json = {
-    coin: ladoSug != null ? `+${mm!.mercado * 10 + ladoSug}` : coin, modelo, mercado, sugerencia: ladoSug != null ? `COMPRAR ${nombres[ladoSug].toUpperCase()}` : sug,
-    confianza: Math.max(0, Math.min(100, Number(d.confianza) || 0)),
-    prob_estimada: Number.isFinite(Number(d.prob_estimada)) ? Math.max(0, Math.min(100, Number(d.prob_estimada))) : null,
-    analisis: String(d.analisis || '').slice(0, 800),
-    riesgos: (Array.isArray(d.riesgos) ? d.riesgos : []).slice(0, 4).map((x: unknown) => String(x).slice(0, 160)),
+    coin: ladoSug != null ? `+${mm!.mercado * 10 + ladoSug}` : coin, modelo, mercado, sugerencia: sug,
+    confianza: r.confianza,
+    prob_estimada: probs.length ? Math.round(mediana(probs) * 10) / 10 : null,
+    analisis: (detalle + String(d.analisis || '')).slice(0, 1000),
+    riesgos: riesgos.slice(0, 4),
+    votos: filas.length > 1 ? filas.map((f) => ({ modelo: corto(f.modelo), sugerencia: f.opcion, confianza: f.confianza, prob: f.prob })) : undefined,
     global: global ? { resumen: global.resumen, tono: global.tono, turbulencia: global.turbulencia } : null,
     ts: Date.now(),
   };
@@ -1284,6 +1352,36 @@ function relevantes(lista: Json[], instruccion: string): Json[] {
   return lista.filter((m) => !m.sin_ofertas).map((m) => ({ m, p: puntos(m) })).sort((a, b) => b.p - a.p || (a.m.vence || 9e15) - (b.m.vence || 9e15)).slice(0, 35).map((x) => x.m);
 }
 
+// Varias IAs proponen órdenes: pasa una (mismo «coin» y acción) solo si la propone más de
+// la mitad de las que respondieron. Monto y unidades = mediana; confianza como en el voto.
+function unirPropuestas(votos: { datos: Json; modelo: string }[]): { propuestas: Json[]; descartadas: string[] } {
+  const listas = votos.map((v) => (Array.isArray(v.datos.propuestas) ? v.datos.propuestas : []).filter((x: Json) => x && typeof x === 'object').slice(0, 3));
+  if (votos.length === 1) return { propuestas: listas[0], descartadas: [] };
+  const grupos = new Map<string, { x: Json; modelo: string }[]>();
+  listas.forEach((l, i) => {
+    const vistas = new Set<string>();
+    for (const x of l) {
+      const k = `${String(x.coin || '').trim()}|${String(x.accion || '').toUpperCase().trim()}`;
+      if (vistas.has(k)) continue; // una IA no vota dos veces lo mismo
+      vistas.add(k);
+      grupos.set(k, [...(grupos.get(k) || []), { x, modelo: votos[i].modelo }]);
+    }
+  });
+  const propuestas: Json[] = [], descartadas: string[] = [];
+  for (const [k, g] of grupos) {
+    const [coin, accion] = k.split('|');
+    if (g.length * 2 <= votos.length) { descartadas.push(`${coin} ${accion}: solo ${g.length} de ${votos.length} IAs la propuso (${g.map((v) => corto(v.modelo)).join(', ')})`); continue; }
+    const nums = (c: string) => g.map((v) => Number(v.x[c])).filter((n) => Number.isFinite(n) && n > 0);
+    const confs = g.map((v) => Math.max(0, Math.min(100, Number(v.x.confianza) || 0)));
+    const lider = g[confs.indexOf(Math.max(...confs))];
+    propuestas.push({ coin, accion,
+      monto_usdc: nums('monto_usdc').length ? mediana(nums('monto_usdc')) : null, unidades: nums('unidades').length ? mediana(nums('unidades')) : null,
+      confianza: Math.round(confs.reduce((a, c) => a + c, 0) / confs.length * (0.5 + 0.5 * g.length / votos.length)),
+      razon: `${g.length}/${votos.length} IAs: ${String(lider.x.razon || '')}`.slice(0, 240) });
+  }
+  return { propuestas: propuestas.sort((a, b) => b.confianza - a.confianza), descartadas };
+}
+
 async function prediccionPedir(env: Env, c: Json): Promise<Response> {
   const instruccion = String(c.instruccion || '').trim().slice(0, 400);
   if (!instruccion) return json({ error: 'Escribe qué quieres que busque la IA' }, 400);
@@ -1298,9 +1396,9 @@ async function prediccionPedir(env: Env, c: Json): Promise<Response> {
   const pos = mias.map((p) => ({ coin: '#' + String(p.coin).slice(1), q: p.pregunta, lado: p.lado_nombre, unidades: p.cantidad, precio: p.precio,
     pagaste: p.costo ?? undefined, vender_solo_desde: p.min_venta ?? undefined }));
   const t0 = Date.now(), ahora = Date.now();
-  let d: Json, modelo: string;
+  let d: Json, modelo: string, propuestas: Json[], descartadas: string[] = [];
   try {
-    ({ datos: d, modelo } = await iaChat(env, [
+    const { votos } = await iaVarias(env, config, [
       { role: 'system', content: 'Preparas órdenes en mercados de predicción de Hyperliquid para un usuario principiante. Prudente: si nada convence, no propongas nada y explícalo. Nunca inventas mercados: usa solo los «coin» de la lista. Respondes SOLO JSON válido en español.' },
       { role: 'user', content: `El usuario pide: "${instruccion}"
 Cada unidad paga 1 USDC si acierta y 0 si no; «precio» es el precio MEDIO (la compra real se paga al vendedor más barato, que puede ser bastante más caro; Kumo lo comprueba). «modelo_pct» es un modelo estadístico con la volatilidad de 1 h, 24 h y 48 h (no es certeza); «ventaja» = modelo − precio en puntos; «mov_1h_24h_48h_pct» = movimiento típico del subyacente.
@@ -1310,18 +1408,22 @@ Sus posiciones: ${JSON.stringify(pos)}
 Mercados abiertos (los más relevantes a su pedido): ${JSON.stringify(filas)}
 Propón como mucho 3 órdenes. COMPRAR lleva "monto_usdc"; VENDER (solo de sus posiciones) lleva "unidades". REGLA DEL USUARIO: nunca vender con pérdida; VENDER solo si el precio llega a «vender_solo_desde».
 Formato: {"respuesta":"2-4 frases para el usuario","propuestas":[{"coin":"#90170","accion":"COMPRAR","monto_usdc":11,"unidades":null,"confianza":70,"razon":"máx. 25 palabras"}]}` },
-    ]));
+    ], (x) => Array.isArray(x?.propuestas) || typeof x?.respuesta === 'string');
+    modelo = etiquetaVotos(votos);
+    ({ propuestas, descartadas } = unirPropuestas(votos));
+    d = votos[0].datos;
+    if (votos.length > 1) d = { ...d, respuesta: `${String(d.respuesta || '').slice(0, 600)} (Consultadas ${votos.length} IAs: solo pasa lo que propuso la mayoría.)` };
   } catch (e: any) {
     await bitacora(env, [{ ts: ahora, tipo: 'ia', ok: false, texto: `IA (pedir predicciones) falló: ${String(e.message || e).slice(0, 160)}`, ms: Date.now() - t0 }]);
     return json({ error: String(e.message || e) }, 502);
   }
   const porCoin: Json = {};
   for (const m of lista) m.lados.forEach((l: Json) => { porCoin[l.coin] = { m, l }; });
-  const ordenes = await leerOrdenes(env), creadas: Json[] = [], descartadas: string[] = [];
+  const ordenes = await leerOrdenes(env), creadas: Json[] = [];
   // Lo que ya tienes en predicciones + compras pendientes: las propuestas no pasan tu tope.
   let expuesto = mias.reduce((a, p) => a + (Number(p.valor) || 0), 0) + ordenes.filter((o) => PENDIENTE(o) && o.tipo === 'prediccion' && o.accion === 'COMPRAR')
     .reduce((a, o) => a + Number(o.unidades) * Number(o.limite), 0);
-  for (const x of (Array.isArray(d.propuestas) ? d.propuestas : []).slice(0, 3)) {
+  for (const x of propuestas.slice(0, 3)) {
     const coin = String(x.coin || '').trim(), accion = String(x.accion || '').toUpperCase();
     const ref = porCoin[coin], mia = mias.find((p) => '#' + String(p.coin).slice(1) === coin);
     if (!ref && !mia) { descartadas.push(`${coin || '?'}: ese mercado no existe o ya cerró`); continue; }

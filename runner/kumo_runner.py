@@ -312,7 +312,7 @@ def ciclo(remoto, parcial=None):
         # Supervisor IA: cada 6 h revisa cómo van y puede ajustar los parámetros (con límites).
         if SUP.toca(cfg, (remoto.get("estado_runner") or {}).get("super_ts")):
             try:
-                revision = SUP.revisar(cfg, remoto.get("ordenes_pred") or [], preds, pred_ia, ia.chat_json)
+                revision = SUP.revisar(cfg, remoto.get("ordenes_pred") or [], preds, pred_ia, ia.varias_json)
             except Exception as e:  # nunca debe tumbar el ciclo
                 notas.append(f"Supervisor IA: {type(e).__name__}")
 

@@ -171,8 +171,29 @@ class Cadena(Base):
             ia.preguntar({"url": ia.GROQ_URL, "key": "gsk_x", "nombre": "groq"}, "llama-3.3-70b-versatile", [])
         kilo = vistos["https://api.kilo.ai/api/gateway/chat/completions"]
         self.assertNotIn("Authorization", kilo)
-        self.assertEqual(vistos["https://api.kilo.ai/api/gateway/chat/completions#body"]["max_tokens"], 1500)
+        self.assertEqual(vistos["https://api.kilo.ai/api/gateway/chat/completions#body"]["max_tokens"], 4096)
         self.assertEqual(vistos[ia.GROQ_URL + "/chat/completions"]["User-agent"], "curl/8.14.1")
+
+    def test_cortada_por_tokens_lo_dice(self):
+        """Un modelo que razona y se queda sin tokens no es «respuesta vacía»: se cortó."""
+        def con(cuerpo):
+            class R:
+                def __enter__(s):
+                    return s
+
+                def __exit__(s, *a):
+                    pass
+
+                def read(s):
+                    return json.dumps(cuerpo).encode()
+            return mock.patch.object(ia.urllib.request, "urlopen", lambda req, timeout=None: R())
+        kilo = {"url": "https://api.kilo.ai/api/gateway", "key": "", "nombre": "kilo"}
+        for contenido in (None, '{"opiniones": [{"simbolo"'):
+            with con({"choices": [{"finish_reason": "length", "message": {"content": contenido}}]}):
+                self.assertEqual(ia.preguntar(kilo, "m:free", [])[1][1], "se cortó (límite de tokens)")
+        # Si el JSON llegó entero antes del corte, sirve.
+        with con({"choices": [{"finish_reason": "length", "message": {"content": '{"ok": true} y luego más'}}]}):
+            self.assertEqual(ia.preguntar(kilo, "m:free", [])[0], {"ok": True})
 
     def test_groq_json_schema_salvo_llama(self):
         c = ia._cuerpo(ia.GROQ_URL, "openai/gpt-oss-120b", [], True)
@@ -235,3 +256,66 @@ class CandadoDePerdidas(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PrediccionesEnElCiclo(unittest.TestCase):
+    """Ciclo completo con consenso activo en la nube: las decisiones de predicciones y el
+    supervisor las toman varias IAs (aquí respuestas simuladas por modelo)."""
+
+    def test_predicciones_y_supervisor_votan(self):
+        import os
+        import re
+        import kumo_runner as K
+        from tests.test_pred_ia import HLFalso, lista
+
+        votos = {"openai/gpt-oss-120b": ("COMPRAR", 80, 85, 10), "gemini-3.1-flash": ("COMPRAR", 70, 75, 12),
+                 "nvidia/nemotron-3-super-120b-a12b:free": ("NO ENTRAR", 60, 40, None)}
+        pedidos = []
+
+        def falso(url, clave, modelo, mensajes, formato_json=True):
+            texto = mensajes[-1]["content"]
+            acc, conf, prob, ventaja = votos[modelo]
+            if "supervisor" in mensajes[0]["content"]:
+                pedidos.append(("super", modelo))
+                return json.dumps({"cambios": {"pred_ventaja": ventaja} if ventaja else {}, "razon": "r"})
+            pedidos.append(("pred", modelo))
+            coins = sorted(set(re.findall(r'"coin": "(#\d+)"', texto)))
+            return json.dumps({"opiniones": [{"coin": c, "accion": acc, "confianza": conf, "prob": prob, "razon": modelo} for c in coins]})
+
+        hl = HLFalso()
+        remoto = {"config": {"modo": "real", "quote": "USDC", "objetivo": {}, "ia": "veto", "pred_ia": "proponer", "ordenes_ia": "off",
+                             "pred_ventaja": 8, "pred_conf_min": 50},
+                  "ordenes": [], "estado_runner": {}, "ia_proveedores": LISTA, "ia_consenso": {"enabled": True, "size": 3}}
+        try:
+            with mock.patch.dict(os.environ, {"EXCHANGE_ID": "hyperliquid", "EXCHANGE_API_KEY": "0xabc", "EXCHANGE_SECRET": "x"}), \
+                    mock.patch.object(K, "crear_exchange", lambda *a: hl), \
+                    mock.patch.object(K, "http", lambda *a, **k: {"mercados": lista()}), \
+                    mock.patch.object(K, "url_nube", lambda: "https://nube"), \
+                    mock.patch.object(K.ia, "opinar", lambda *a: ({}, None, None)), \
+                    mock.patch.object(ia, "_llamar", falso):
+                rep = K.ciclo(remoto)
+        finally:
+            ia.configurar(None, None)
+        pia = rep["pred_ia"]
+        self.assertTrue(pia["modelo"].startswith("consenso:"), pia["modelo"])
+        self.assertEqual(len({m for q, m in pedidos if q == "pred"}), 3)
+        op = pia["opiniones"][0]
+        self.assertEqual(op["accion"], "COMPRAR")
+        self.assertIn("Consenso 2/3", op["razon"])
+        # Supervisor: 2 de 3 piden subir la ventaja → mediana de 10 y 12 = 11.
+        self.assertTrue(rep["supervisor"]["modelo"].startswith("consenso:"))
+        self.assertEqual(rep["supervisor"]["cambios"], {"pred_ventaja": 11.0})
+        self.assertEqual(len({m for q, m in pedidos if q == "super"}), 3)
+
+    def test_varias_json_sin_consenso_es_la_cadena(self):
+        ia.configurar(LISTA, {"enabled": False})
+        try:
+            with mock.patch.object(ia, "_llamar", lambda *a, **k: json.dumps({"cambios": {}})):
+                ok, error = ia.varias_json([{"role": "user", "content": "x"}], lambda d: "cambios" in d)
+            self.assertEqual((len(ok), error), (1, None))
+            with mock.patch.object(ia, "_llamar", lambda *a, **k: json.dumps({"otra": 1})):
+                ok, error = ia.varias_json([{"role": "user", "content": "x"}], lambda d: "cambios" in d)
+            self.assertEqual(ok, [])
+            self.assertIn("formato inválido", error)
+        finally:
+            ia.configurar(None, None)

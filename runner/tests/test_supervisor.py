@@ -26,13 +26,33 @@ class Supervisor(unittest.TestCase):
     def test_revisar(self):
         vistos = []
 
-        def chat(m):
+        def varias(m, valido):
             vistos.append(m[1]["content"])
-            return {"cambios": {"pred_ventaja": 10}, "razon": "Muchas órdenes sin llenar"}, "m1", None
-        r = SUP.revisar(CFG, [{"accion": "COMPRAR", "estado": "error", "error": "No se llenó"}], [], {"revisados": 4}, chat)
+            return [("m1", {"cambios": {"pred_ventaja": 10}, "razon": "Muchas órdenes sin llenar"})], None
+        r = SUP.revisar(CFG, [{"accion": "COMPRAR", "estado": "error", "error": "No se llenó"}], [], {"revisados": 4}, varias)
         self.assertEqual((r["cambios"], r["modelo"]), ({"pred_ventaja": 10.0}, "m1"))
         self.assertIn("No se llenó", vistos[0])
-        self.assertIsNone(SUP.revisar(CFG, [], [], None, lambda m: (None, None, "caída")))
+        self.assertIsNone(SUP.revisar(CFG, [], [], None, lambda m, v: ([], "caída")))
+
+    def test_consenso_del_supervisor(self):
+        """Un cambio pasa solo si más de la mitad lo pide, al valor mediano; las categorías,
+        solo las que todas dejan; y nunca pasa los techos del usuario."""
+        resp = [("a/x:free", {"cambios": {"pred_ventaja": 10, "pred_monto": 15, "pred_categorias": ["cripto_hoy"]}, "razon": "ra"}),
+                ("b", {"cambios": {"pred_ventaja": 14, "pred_max_ciclo": 1}, "razon": "rb"}),
+                ("c", {"cambios": {"pred_ventaja": 12, "pred_monto": 50}, "razon": "rc"})]
+        r = SUP.revisar(CFG, [], [], None, lambda m, v: ([x for x in resp if v(x[1])], None))
+        # ventaja 3/3 → mediana 12; monto 2/3 → mediana de 15 y 20 (50 recortado al techo) = 17.5;
+        # pred_max_ciclo solo 1/3 → no cambia.
+        self.assertEqual(r["cambios"], {"pred_ventaja": 12.0, "pred_monto": 17.5})
+        self.assertEqual(r["modelo"], "consenso:x+b+c")
+        self.assertIn("Consenso de 3 IAs", r["razon"])
+        # 1 de 2 no es mayoría: nada cambia.
+        r2 = SUP.revisar(CFG, [], [], None, lambda m, v: ([resp[0], ("b", {"cambios": {}, "razon": "todo bien"})], None))
+        self.assertEqual(r2["cambios"], {})
+        # Una respuesta con «cambios» que no es un objeto no cuenta como voto.
+        validos = []
+        SUP.revisar(CFG, [], [], None, lambda m, v: (validos.extend([v({"cambios": [1]}), v({"cambios": {}})]), ([], "x"))[1])
+        self.assertEqual(validos, [False, True])
 
     def test_en_el_ciclo_cada_6h(self):
         def correr(super_ts):

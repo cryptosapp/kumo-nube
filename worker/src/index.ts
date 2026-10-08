@@ -592,30 +592,79 @@ function normal(x: number): number {
   return x >= 0 ? (1 + e) / 2 : (1 - e) / 2;
 }
 // Probabilidad de que el precio termine ≥ objetivo con un modelo log-normal y la
-// volatilidad por hora de las últimas 48 h. Es una referencia, no una certeza.
+// volatilidad por hora del plazo (1 h / 24 h / 48 h por tramos). Referencia, no certeza.
 function probModelo(ahora: number, objetivo: number, sigmaH: number, horas: number): number | null {
   if (!(ahora > 0 && objetivo > 0 && sigmaH > 0 && horas > 0)) return null;
   const s = sigmaH * Math.sqrt(horas);
   return normal((Math.log(ahora / objetivo) - s * s / 2) / s);
 }
-// Volatilidad por hora del subyacente: últimas 48 h para lo que vence pronto y
-// 7 días para el mediano plazo. Una sola petición de velas 1h por subyacente
-// (el plan gratis de Cloudflare permite 50 subpeticiones por llamada).
+// Volatilidad por hora en tres ventanas, con velas de 15 min de las últimas 49 h
+// (una sola petición por activo: el plan gratis de Cloudflare permite 50 por llamada):
+//  · 1 h: rango alto-bajo de las 4 últimas velas (Parkinson, más estable que 4 cierres);
+//  · 24 h y 48 h: desviación de los cierres.
+// También el cambio de precio en 1 h, 24 h y 48 h (para el análisis del mercado global).
+const volMem = new Map<string, { ts: number; v: Json }>();
 async function volatilidades(subyacentes: string[]): Promise<Json> {
-  const out: Json = {};
-  await Promise.all(subyacentes.slice(0, 30).map(async (u) => {
+  const out: Json = {}, ahora = Date.now();
+  await Promise.all(subyacentes.slice(0, 26).map(async (u) => {
+    const m = volMem.get(u);
+    if (m && ahora - m.ts < 3 * 60_000) { out[u] = m.v; return; }
     try {
-      const velas: Json[] = await hlInfo({ type: 'candleSnapshot', req: { coin: u, interval: '1h', startTime: Date.now() - 7 * 24 * 3_600_000, endTime: Date.now() } });
-      const c = velas.map((v) => Number(v.c)).filter((x) => x > 0);
-      if (c.length < 6) return;
-      const sigma = (xs: number[]) => {
-        const r = xs.slice(1).map((x, i) => Math.log(x / xs[i])), m = r.reduce((a, b) => a + b, 0) / r.length;
-        return Math.sqrt(r.reduce((a, b) => a + (b - m) ** 2, 0) / Math.max(1, r.length - 1));
+      const velas: Json[] = await hlInfo({ type: 'candleSnapshot', req: { coin: u, interval: '15m', startTime: ahora - 49 * 3_600_000, endTime: ahora } });
+      const v = velas.map((x) => ({ c: Number(x.c), h: Number(x.h), l: Number(x.l) })).filter((x) => x.c > 0 && x.h > 0 && x.l > 0);
+      if (v.length < 12) return;
+      const c = v.map((x) => x.c), n = c.length - 1;
+      const sd = (xs: number[]) => {
+        const r = xs.slice(1).map((x, i) => Math.log(x / xs[i])), me = r.reduce((a, b) => a + b, 0) / r.length;
+        return Math.sqrt(r.reduce((a, b) => a + (b - me) ** 2, 0) / Math.max(1, r.length - 1));
       };
-      out[u] = { sigma_48h: sigma(c.slice(-49)), sigma_7d: sigma(c), cambio_24h_pct: c.length > 24 ? Math.round((c[c.length - 1] / c[c.length - 25] - 1) * 10000) / 100 : null };
+      // Por hora = por vela de 15 min × √4.
+      const s24 = sd(c.slice(-97)) * 2, s48 = sd(c) * 2;
+      const park = Math.sqrt(v.slice(-4).reduce((a, x) => a + Math.log(x.h / x.l) ** 2, 0) / 4 / (4 * Math.LN2)) * 2;
+      // Una hora sin movimiento no significa que el riesgo desapareció: piso en la mitad de la de 24 h.
+      const s1 = Math.max(park || 0, s24 * 0.5);
+      const cambio = (k: number) => (n >= k ? Math.round((c[n] / c[n - k] - 1) * 10000) / 100 : null);
+      const r = s48 > 0 ? s1 / s48 : 1;
+      const x: Json = { sigma_1h: s1, sigma_24h: s24, sigma_48h: s48, cambio_1h_pct: cambio(4), cambio_24h_pct: cambio(96), cambio_48h_pct: cambio(Math.min(n, 192)),
+        regimen: r >= 1.8 ? 'turbulento' : r <= 0.5 ? 'calmo' : 'normal' };
+      volMem.set(u, { ts: ahora, v: x });
+      out[u] = x;
     } catch { /* sin velas: sin modelo */ }
   }));
   return out;
+}
+// Volatilidad para un plazo de h horas, por tramos: la primera hora con la vol de 1 h,
+// hasta 24 h con la de 24 h y el resto con la de 48 h (varianzas que se suman).
+function sigmaPlazo(v: Json, h: number): number {
+  const var_ = v.sigma_1h ** 2 * Math.min(h, 1) + v.sigma_24h ** 2 * Math.min(Math.max(h - 1, 0), 23) + v.sigma_48h ** 2 * Math.max(h - 24, 0);
+  return Math.sqrt(var_ / h);
+}
+// Movimiento típico (1 desviación) en %, para mostrar.
+const movTipico = (v: Json) => ({ h1: Math.round(v.sigma_1h * 10000) / 100, h24: Math.round(v.sigma_24h * Math.sqrt(24) * 10000) / 100, h48: Math.round(v.sigma_48h * Math.sqrt(48) * 10000) / 100 });
+// ---- Mercado global: cripto, bolsa, oro y petróleo en 1 h / 24 h / 48 h. Entra en
+// cada decisión (IA y reglas): tono (apetito o aversión al riesgo) y turbulencia.
+const GLOBALES = ['BTC', 'ETH', 'SOL', 'HYPE', 'xyz:SP500', 'xyz:XYZ100', 'xyz:GOLD', 'xyz:CL'];
+function mercadoGlobal(mids: Json, vol: Json, ahora: number): Json {
+  const activos = GLOBALES.filter((s) => vol[s] && mids[s] != null).map((s) => ({ sub: s, nombre: nombreSub(s), precio: Number(mids[s]),
+    cambio_1h_pct: vol[s].cambio_1h_pct, cambio_24h_pct: vol[s].cambio_24h_pct, cambio_48h_pct: vol[s].cambio_48h_pct, regimen: vol[s].regimen, mov: movTipico(vol[s]) }));
+  const prom = (subs: string[]) => {
+    const xs = activos.filter((a) => subs.includes(a.sub) && a.cambio_24h_pct != null).map((a) => a.cambio_24h_pct as number);
+    return xs.length ? Math.round(xs.reduce((a, b) => a + b, 0) / xs.length * 100) / 100 : null;
+  };
+  const cripto = prom(['BTC', 'ETH', 'SOL', 'HYPE']), bolsa = prom(['xyz:SP500', 'xyz:XYZ100']), oro = prom(['xyz:GOLD']), petroleo = prom(['xyz:CL']);
+  const riesgo = [cripto, bolsa].filter((x) => x != null) as number[];
+  let tono = 'mixto';
+  if (riesgo.length && riesgo.every((x) => x >= 0.5)) tono = 'alcista';
+  else if (riesgo.length && riesgo.every((x) => x <= -0.5)) tono = 'bajista';
+  const refugio = oro != null && oro >= 0.5 && (bolsa ?? 0) < 0;
+  const turb = activos.filter((a) => a.regimen === 'turbulento');
+  const turbulencia = turb.length > 0 && (turb.length * 3 >= activos.length || turb.some((a) => a.sub === 'BTC' || a.sub === 'xyz:SP500'));
+  const f = (x: number | null) => (x == null ? '—' : `${x > 0 ? '+' : ''}${x}%`);
+  const resumen = `24 h: cripto ${f(cripto)}, bolsa ${f(bolsa)}, oro ${f(oro)}, petróleo ${f(petroleo)}. ` +
+    (tono === 'alcista' ? 'Apetito por riesgo (todo sube).' : tono === 'bajista' ? 'Aversión al riesgo (cripto y bolsa caen).' : 'Tono mixto.') +
+    (refugio ? ' El oro sube mientras la bolsa baja: buscan refugio.' : '') +
+    (turbulencia ? ` Turbulencia: la última hora se mueve mucho más que lo normal (${turb.map((a) => a.nombre).join(', ')}); Kumo exige más ventaja.` : ' Volatilidad normal.');
+  return { ts: ahora, activos, cripto_24h_pct: cripto, bolsa_24h_pct: bolsa, oro_24h_pct: oro, petroleo_24h_pct: petroleo, tono, refugio, turbulencia, resumen };
 }
 // Mejor comprador y mejor vendedor ahora (libro público de Hyperliquid).
 async function prediccionLibro(url: URL): Promise<Response> {
@@ -636,7 +685,7 @@ async function prediccionGrafica(url: URL): Promise<Response> {
   const mem = graficaPredMem.get(coin);
   if (mem && Date.now() - mem.ts < 60_000) return json({ ...mem.datos, cache: true });
   const cod = Number(coin.slice(1)), mercado = Math.floor(cod / 10), lado = cod % 10;
-  const lista: Json[] = (await listaMercados()).mercados || [];
+  const todo = await listaMercados(), lista: Json[] = todo.mercados || [];
   const m = lista.find((x) => x.mercado === mercado);
   if (!m) return json({ error: 'Ese mercado ya no está abierto.' }, 404);
   const ahora = Date.now(), ld = m.lados[lado] || {};
@@ -655,7 +704,9 @@ async function prediccionGrafica(url: URL): Promise<Response> {
   const datos: Json = { coin, mercado, lado, pregunta: m.pregunta, lado_nombre: ld.nombre, precio_lado: ld.precio ?? null, ventaja: ld.ventaja ?? null,
     prob_modelo: ld.prob_modelo ?? null, regla: m.regla, tipo: m.tipo, lineas: m.lineas || [], nombre_sub: m.nombre_sub,
     subyacente: m.subyacente, objetivo: m.objetivo, precio_actual: m.precio_actual ?? null, vence: m.vence, ts: ahora, prob,
-    marcos: m.subyacente ? { '1h': h1, '4h': h4, '1d': d1 } : null };
+    lados: m.lados, mov: m.mov || null, regimen: m.regimen || null, cambio_1h_pct: m.cambio_1h_pct ?? null, cambio_24h_pct: m.cambio_24h_pct ?? null, cambio_48h_pct: m.cambio_48h_pct ?? null,
+    sigma_plazo_pct: m.sigma_plazo_pct ?? null,
+    marcos: m.subyacente ? { '1h': h1, '4h': h4, '1d': d1 } : null, global: todo.global || null };
   graficaPredMem.set(coin, { ts: ahora, datos });
   return json(datos);
 }
@@ -750,15 +801,20 @@ async function listaMercados(): Promise<Json> {
       subyacente: m.sub || null, nombre_sub: N || null, objetivo: m.tipo === 'rango' ? null : m.objetivo ?? null, desde: m.desde ?? null, hasta: m.hasta ?? null, lineas,
       vence: m.vence || null, horas, lados, quote: o.quoteToken || 'USDC', sin_ofertas: sinOfertas || undefined });
   }
-  const vol = await volatilidades([...new Set(lista.filter((m) => m.subyacente && todos[m.subyacente]).map((m) => String(m.subyacente)))]);
+  // Primero los activos del mercado global, luego los subyacentes con más mercados.
+  const usos: Json = {};
+  for (const m of lista) if (m.subyacente && todos[m.subyacente]) usos[m.subyacente] = (usos[m.subyacente] || 0) + 1;
+  const subs = [...GLOBALES.filter((g) => todos[g] != null), ...Object.keys(usos).filter((u) => !GLOBALES.includes(u)).sort((a, b) => usos[b] - usos[a])];
+  const vol = await volatilidades(subs);
   for (const m of lista) {
     if (!m.subyacente || !todos[m.subyacente]) continue;
     const S = Number(todos[m.subyacente]), v = vol[m.subyacente];
     m.precio_actual = S;
     if (m.objetivo) m.distancia_pct = Math.round((S / m.objetivo - 1) * 10000) / 100;
     if (!v || !m.horas || m.horas <= 0) continue;
-    m.cambio_24h_pct = v.cambio_24h_pct;
-    const sg = m.horas <= 48 ? v.sigma_48h : v.sigma_7d;
+    Object.assign(m, { cambio_1h_pct: v.cambio_1h_pct, cambio_24h_pct: v.cambio_24h_pct, cambio_48h_pct: v.cambio_48h_pct, regimen: v.regimen, mov: movTipico(v) });
+    const sg = sigmaPlazo(v, m.horas);
+    m.sigma_plazo_pct = Math.round(sg * Math.sqrt(m.horas) * 10000) / 100;
     let p: number | null = null;
     if (m.tipo === 'precio') p = probSobre(S, m.objetivo, sg, m.horas);
     else if (m.tipo === 'toque') p = probToque(S, m.objetivo, sg, m.horas);
@@ -779,7 +835,7 @@ async function listaMercados(): Promise<Json> {
   lista.sort((a, b) => orden[a.categoria] - orden[b.categoria] || (a.vence || 9e15) - (b.vence || 9e15));
   const cuenta: Json = {};
   for (const m of lista) { const k = m.categoria === 'cripto' ? `cripto_${m.plazo}` : m.categoria; cuenta[k] = (cuenta[k] || 0) + 1; }
-  const datos = { ts: ahora, mercados: lista.slice(0, 200), total: lista.length, cuenta };
+  const datos = { ts: ahora, mercados: lista.slice(0, 200), total: lista.length, cuenta, global: mercadoGlobal(todos, vol, ahora) };
   mercadosMem = { ts: ahora, datos };
   return datos;
 }
@@ -788,31 +844,48 @@ async function prediccionMercados(): Promise<Response> {
 }
 
 async function prediccionAnalizar(env: Env, c: Json): Promise<Response> {
-  // Una posición tuya («+N») o cualquier mercado abierto («mercado» + «lado»).
+  // Una posición tuya («+N»), un lado de un mercado («mercado» + «lado») o el mercado
+  // completo («mercado» sin lado): entonces la IA elige entre comprar Sí, No o no entrar.
   const explorar = c.mercado != null;
+  const ambos = explorar && (c.lado == null || c.lado === '');
   const coin = explorar ? `+${Number(c.mercado) * 10 + (Number(c.lado) ? 1 : 0)}` : String(c.coin || '');
   if (!/^\+\d+$/.test(coin)) return json({ error: 'Predicción inválida' }, 400);
-  const mem = prediccionMem.get(coin);
+  const clave = ambos ? `m${Number(c.mercado)}` : coin;
+  const mem = prediccionMem.get(clave);
   if (mem && Date.now() - mem.ts < 10 * 60_000) return json({ ...mem.datos, cache: true });
   const estado = await leer<Json>(env, 'estado', {});
-  let p = ((estado.ultimo?.predicciones || []) as Json[]).find((x) => x.coin === coin);
-  // Datos del mercado (regla, modelo) de la lista abierta, tengas o no posición.
-  const cod0 = Number(coin.slice(1)), lista: Json[] = (await listaMercados().catch(() => ({ mercados: [] }))).mercados || [];
+  const mias: Json[] = estado.ultimo?.predicciones || [];
+  let p = mias.find((x) => x.coin === coin);
+  // Datos del mercado (regla, modelo, volatilidad) de la lista abierta, tengas o no posición.
+  const cod0 = Number(coin.slice(1)), todo: Json = await listaMercados().catch(() => ({ mercados: [] }));
+  const lista: Json[] = todo.mercados || [];
   const mm = lista.find((x) => x.mercado === Math.floor(cod0 / 10)), ld = mm?.lados[cod0 % 10];
   if (!p && explorar && mm) p = { coin, pregunta: mm.pregunta, lado_nombre: ld?.nombre, cantidad: 0, pago_si_acierta: 0, vence: mm.vence };
   if (p && mm) Object.assign(p, { subyacente: mm.subyacente, objetivo: mm.objetivo, regla: mm.regla, tipo: mm.tipo, prob_modelo_lado: ld?.prob_modelo ?? null, desde: mm.desde, hasta: mm.hasta });
   if (!p) return json({ error: explorar ? 'Ese mercado ya no está abierto.' : 'Esa predicción no está en tu último ciclo: espera al próximo.' }, 404);
   if (p.vence && p.vence < Date.now()) return json({ error: 'Esta predicción ya venció: se liquida sola.' }, 409);
+  // Si ya tienes un lado de este mercado, el análisis completo lo tiene en cuenta.
+  const tuya = ambos && mm ? mias.find((x) => Math.floor(Number(String(x.coin).slice(1)) / 10) === mm.mercado) : null;
+  const mercado: Json = { pregunta: p.pregunta, regla: p.regla || null, tipo_mercado: p.tipo || null,
+    rango: p.tipo === 'rango' ? [p.desde, p.hasta] : undefined, horas_para_vencer: p.vence ? Math.round((p.vence - Date.now()) / 360_000) / 10 : null };
+  if (ambos) {
+    mercado.lados = (mm?.lados || []).map((l: Json) => ({ lado: l.nombre, precio: l.precio, prob_modelo_pct: l.prob_modelo ?? null, ventaja_pts: l.ventaja ?? null }));
+    if (tuya) mercado.ya_tienes = { lado: tuya.lado_nombre, unidades: tuya.cantidad };
+  } else Object.assign(mercado, { tu_lado: p.lado_nombre, unidades: p.cantidad, pago_si_aciertas: p.pago_si_acierta, tiene_posicion: (p.cantidad || 0) > 0,
+    prob_modelo_estadistico_tu_lado_pct: p.prob_modelo_lado ?? null });
+  // Volatilidad del subyacente en 1 h / 24 h / 48 h y el mercado global.
+  if (mm?.mov) Object.assign(mercado, { movimiento_tipico_pct: mm.mov, regimen_volatilidad: mm.regimen, cambio_1h_pct: mm.cambio_1h_pct, cambio_48h_pct: mm.cambio_48h_pct,
+    movimiento_esperado_hasta_vencer_pct: mm.sigma_plazo_pct });
+  const global = todo.global || null;
   // Datos frescos y públicos: probabilidad actual, precio del subyacente y sus últimas 24 h.
-  const mercado: Json = { pregunta: p.pregunta, tu_lado: p.lado_nombre, unidades: p.cantidad, pago_si_aciertas: p.pago_si_acierta, tiene_posicion: (p.cantidad || 0) > 0,
-    regla: p.regla || null, tipo_mercado: p.tipo || null,
-    prob_modelo_estadistico_tu_lado_pct: p.prob_modelo_lado ?? null, rango: p.tipo === 'rango' ? [p.desde, p.hasta] : undefined,
-    horas_para_vencer: p.vence ? Math.round((p.vence - Date.now()) / 360_000) / 10 : null };
   try {
     const [m1, m2] = await Promise.all([hlInfo({ type: 'allMids' }), hlInfo({ type: 'allMids', dex: 'xyz' }).catch(() => ({}))]);
     const mids: Json = { ...m1, ...m2 }, cod = coin.slice(1);
-    mercado.precio_tu_lado = Number(mids['#' + cod] ?? p.precio);
-    mercado.prob_mercado_tu_lado_pct = Math.round(mercado.precio_tu_lado * 1000) / 10;
+    if (ambos) (mm?.lados || []).forEach((l: Json, i: number) => { if (mids[l.coin] != null) mercado.lados[i].precio = Number(mids[l.coin]); });
+    else {
+      mercado.precio_tu_lado = Number(mids['#' + cod] ?? p.precio);
+      mercado.prob_mercado_tu_lado_pct = Math.round(mercado.precio_tu_lado * 1000) / 10;
+    }
     if (p.subyacente && mids[p.subyacente]) {
       const ahora = Number(mids[p.subyacente]);
       mercado.subyacente = p.subyacente; mercado.precio_actual = ahora; mercado.objetivo = p.objetivo;
@@ -832,25 +905,40 @@ async function prediccionAnalizar(env: Env, c: Json): Promise<Response> {
     }
   } catch (e: any) {
     mercado.aviso = `Sin datos frescos de Hyperliquid (${String(e?.message || e).slice(0, 80)})`;
-    mercado.precio_tu_lado = p.precio;
+    if (!ambos) mercado.precio_tu_lado = p.precio;
   }
+  const nombres: string[] = ambos ? (mm?.lados || []).map((l: Json) => String(l.nombre)) : [];
+  const pide = ambos
+    ? `El usuario mira este mercado completo y quiere saber si comprar un lado. Sugiere UNA acción: COMPRAR con "lado" = ${nombres.map((n) => `"${n}"`).join(' o ')}, o NO ENTRAR (lado null).${mercado.ya_tienes ? ' Ya tiene posición en este mercado: tenlo en cuenta.' : ''}`
+    : mercado.tiene_posicion ? 'Sugiere UNA acción: MANTENER (esperar al vencimiento), VENDER (cerrar ahora al precio del mercado) o COMPRAR MÁS.' : 'El usuario aún NO tiene posición en este lado: sugiere COMPRAR (entrar en este lado) o NO ENTRAR.';
   const t0 = Date.now();
   const { datos: d, modelo } = await iaChat(env, [
     { role: 'system', content: 'Eres un analista prudente de mercados de predicción. Explicas a un principiante en español sencillo. No prometes resultados. Respondes SOLO JSON válido.' },
-    { role: 'user', content: `El usuario mira esta posición en un mercado de predicción de Hyperliquid (cada unidad paga 1 si acierta y 0 si no; el precio es la probabilidad que le da el mercado):\n${JSON.stringify(mercado)}\nAnaliza si su lado tiene buenas probabilidades: lee la regla del mercado; si depende de un precio, compara el precio actual con el objetivo, el tiempo que queda y cuánto se mueve; si es un evento (economía, empresas), usa lo que sepas y di claramente si tu información puede estar desactualizada. Compara tu probabilidad con la del mercado. ${mercado.tiene_posicion ? 'Sugiere UNA acción: MANTENER (esperar al vencimiento), VENDER (cerrar ahora al precio del mercado) o COMPRAR MÁS.' : 'El usuario aún NO tiene posición en este lado: sugiere COMPRAR (entrar en este lado) o NO ENTRAR.'}\nFormato: {"sugerencia":"MANTENER|VENDER|COMPRAR MÁS|COMPRAR|NO ENTRAR","confianza":0-100,"prob_estimada":0-100,"analisis":"2-4 frases","riesgos":["..."]}` },
+    { role: 'user', content: `Mercado de predicción de Hyperliquid (cada unidad paga 1 si acierta y 0 si no; el precio es la probabilidad que le da el mercado):\n${JSON.stringify(mercado)}\nMercado global ahora: ${global ? JSON.stringify({ resumen: global.resumen, tono: global.tono, turbulencia: global.turbulencia }) : 'sin datos'}\n` +
+      `Lee la regla. Si depende de un precio, compara precio actual con objetivo, el tiempo que queda y cuánto se mueve: «movimiento_tipico_pct» es 1 desviación en 1 h, 24 h y 48 h; «movimiento_esperado_hasta_vencer_pct» es la que usa el modelo hasta el vencimiento; si el régimen es «turbulento», la última hora se mueve mucho más que lo normal. Ten en cuenta el mercado global (tono de riesgo, refugio, turbulencia) y la tendencia de 1 h / 24 h / 48 h. Si es un evento (economía, empresas), usa lo que sepas y di claramente si tu información puede estar desactualizada. Compara tu probabilidad con la del mercado. ${pide}\n` +
+      `Formato: {"sugerencia":"${ambos ? 'COMPRAR|NO ENTRAR' : 'MANTENER|VENDER|COMPRAR MÁS|COMPRAR|NO ENTRAR'}",${ambos ? '"lado":"' + (nombres[0] || 'Sí') + '",' : ''}"confianza":0-100,"prob_estimada":0-100,"analisis":"2-4 frases","riesgos":["..."]}${ambos ? ' (prob_estimada = probabilidad de que el lado sugerido acierte; si NO ENTRAR, la de «' + (nombres[0] || 'Sí') + '»)' : ''}` },
   ]);
-  const validas = mercado.tiene_posicion ? ['MANTENER', 'VENDER', 'COMPRAR MÁS'] : ['COMPRAR', 'NO ENTRAR'];
-  const sug = validas.includes(String(d.sugerencia).toUpperCase()) ? String(d.sugerencia).toUpperCase() : validas[0] === 'MANTENER' ? 'MANTENER' : 'NO ENTRAR';
-  const datos = {
-    coin, modelo, mercado, sugerencia: sug,
+  let sug: string, ladoSug: number | null = null;
+  if (ambos) {
+    const i = nombres.findIndex((n) => n.toLowerCase() === String(d.lado || '').trim().toLowerCase() || (n === 'Sí' && /^s[ií]$|^yes$/i.test(String(d.lado || '').trim())));
+    sug = String(d.sugerencia).toUpperCase() === 'COMPRAR' && i >= 0 ? 'COMPRAR' : 'NO ENTRAR';
+    if (sug === 'COMPRAR') ladoSug = i;
+  } else {
+    const validas = mercado.tiene_posicion ? ['MANTENER', 'VENDER', 'COMPRAR MÁS'] : ['COMPRAR', 'NO ENTRAR'];
+    sug = validas.includes(String(d.sugerencia).toUpperCase()) ? String(d.sugerencia).toUpperCase() : validas[0] === 'MANTENER' ? 'MANTENER' : 'NO ENTRAR';
+  }
+  const datos: Json = {
+    coin: ladoSug != null ? `+${mm!.mercado * 10 + ladoSug}` : coin, modelo, mercado, sugerencia: ladoSug != null ? `COMPRAR ${nombres[ladoSug].toUpperCase()}` : sug,
     confianza: Math.max(0, Math.min(100, Number(d.confianza) || 0)),
     prob_estimada: Number.isFinite(Number(d.prob_estimada)) ? Math.max(0, Math.min(100, Number(d.prob_estimada))) : null,
     analisis: String(d.analisis || '').slice(0, 800),
     riesgos: (Array.isArray(d.riesgos) ? d.riesgos : []).slice(0, 4).map((x: unknown) => String(x).slice(0, 160)),
+    global: global ? { resumen: global.resumen, tono: global.tono, turbulencia: global.turbulencia } : null,
     ts: Date.now(),
   };
-  prediccionMem.set(coin, { ts: Date.now(), datos });
-  await bitacora(env, [{ ts: Date.now(), tipo: 'ia', ok: true, modelo, ms: Date.now() - t0, texto: `IA (predicción ${p.pregunta} · ${p.lado_nombre}) sugirió ${sug} con ${modelo} en ${((Date.now() - t0) / 1000).toFixed(1)} s` }]);
+  if (ambos) Object.assign(datos, { mercado_id: mm!.mercado, lado_sugerido: ladoSug, lado_nombre: ladoSug != null ? nombres[ladoSug] : null });
+  prediccionMem.set(clave, { ts: Date.now(), datos });
+  await bitacora(env, [{ ts: Date.now(), tipo: 'ia', ok: true, modelo, ms: Date.now() - t0, texto: `IA (predicción ${p.pregunta}${ambos ? '' : ' · ' + p.lado_nombre}) sugirió ${datos.sugerencia} con ${modelo} en ${((Date.now() - t0) / 1000).toFixed(1)} s` }]);
   return json(datos);
 }
 
@@ -883,7 +971,8 @@ async function prediccionPedir(env: Env, c: Json): Promise<Response> {
   const mias: Json[] = estado.ultimo?.predicciones || [];
   const libre = estado.ultimo?.libre ?? null;
   const filas = relevantes(lista, instruccion).map((m) => ({ q: m.pregunta, cat: m.categoria === 'cripto' ? `cripto_${m.plazo}` : m.categoria, horas: m.horas,
-    ahora: m.precio_actual ?? undefined, regla: m.regla || undefined,
+    ahora: m.precio_actual ?? undefined, regla: m.regla || undefined, mov_1h_24h_48h_pct: m.mov ? [m.mov.h1, m.mov.h24, m.mov.h48] : undefined,
+    cambio_1h_24h_pct: m.mov ? [m.cambio_1h_pct, m.cambio_24h_pct] : undefined, turbulento: m.regimen === 'turbulento' || undefined,
     lados: m.lados.map((l: Json) => ({ coin: l.coin, lado: l.nombre, precio: l.precio, modelo_pct: l.prob_modelo ?? undefined, ventaja: l.ventaja ?? undefined })) }));
   const pos = mias.map((p) => ({ coin: '#' + String(p.coin).slice(1), q: p.pregunta, lado: p.lado_nombre, unidades: p.cantidad, precio: p.precio }));
   const t0 = Date.now(), ahora = Date.now();
@@ -892,7 +981,8 @@ async function prediccionPedir(env: Env, c: Json): Promise<Response> {
     ({ datos: d, modelo } = await iaChat(env, [
       { role: 'system', content: 'Preparas órdenes en mercados de predicción de Hyperliquid para un usuario principiante. Prudente: si nada convence, no propongas nada y explícalo. Nunca inventas mercados: usa solo los «coin» de la lista. Respondes SOLO JSON válido en español.' },
       { role: 'user', content: `El usuario pide: "${instruccion}"
-Cada unidad paga 1 USDC si acierta y 0 si no; el precio es la probabilidad del mercado. «modelo_pct» es un modelo estadístico de volatilidad (no es certeza); «ventaja» = modelo − precio en puntos.
+Cada unidad paga 1 USDC si acierta y 0 si no; el precio es la probabilidad del mercado. «modelo_pct» es un modelo estadístico con la volatilidad de 1 h, 24 h y 48 h (no es certeza); «ventaja» = modelo − precio en puntos; «mov_1h_24h_48h_pct» = movimiento típico del subyacente.
+Mercado global: ${lista0.global?.resumen || 'sin datos'} Tenlo en cuenta (con turbulencia sé más exigente).
 USDC libres: ${libre ?? 'desconocido'}.${config.pred_pagar_con ? ` Si falta USDC, Kumo vende ${config.pred_pagar_con} para pagar (tiene ${(estado.ultimo?.activos || []).find((a: Json) => a.simbolo === config.pred_pagar_con)?.valor ?? '?'} USDC en ${config.pred_pagar_con}).` : ''} Por compra suele usar ${config.pred_monto} USDC (mínimo 10). Tope total en predicciones: ${config.pred_max_total} USDC.
 Sus posiciones: ${JSON.stringify(pos)}
 Mercados abiertos (los más relevantes a su pedido): ${JSON.stringify(filas)}

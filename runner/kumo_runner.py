@@ -303,8 +303,10 @@ def predicciones_ia(base, ex, cfg, preds, pendientes, libre, notas):
     la nube; cada orden lleva como límite el mejor precio REAL del libro (no el
     precio medio, que casi nunca se llena). Devuelve (órdenes, resumen)."""
     try:
-        lista = http("GET", url_nube() + "/runner/predicciones", os.getenv("KUMO_RUNNER_TOKEN", "")).get("mercados") or []
-        nuevas, notas_p, resumen = PR.proponer(cfg, lista, preds, pendientes, libre, ia.opinar_predicciones, base.mejor_precio_prediccion)
+        datos = http("GET", url_nube() + "/runner/predicciones", os.getenv("KUMO_RUNNER_TOKEN", ""))
+        lista, glob = datos.get("mercados") or [], datos.get("global")
+        nuevas, notas_p, resumen = PR.proponer(cfg, lista, preds, pendientes, libre, lambda c, p: ia.opinar_predicciones(c, p, glob),
+                                               base.mejor_precio_prediccion, glob)
     except Exception as e:  # nunca debe tumbar el ciclo
         notas.append(f"IA predicciones: {type(e).__name__}")
         return [], None

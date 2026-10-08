@@ -44,7 +44,7 @@ class Supervisor(unittest.TestCase):
                     mock.patch.object(K, "http", lambda *a, **k: {"mercados": lista()}), \
                     mock.patch.object(K, "url_nube", lambda: "https://nube"), \
                     mock.patch.object(K.ia, "opinar", lambda *a: ({}, None, None)), \
-                    mock.patch.object(K.ia, "opinar_predicciones", lambda c, p: (OPS, "m", None)), \
+                    mock.patch.object(K.ia, "opinar_predicciones", lambda c, p, *_: (OPS, "m", None)), \
                     mock.patch.object(K.ia, "chat_json", lambda m: ({"cambios": {"pred_ventaja": 11}, "razon": "r"}, "m", None)):
                 return K.ciclo(remoto)
         self.assertEqual(correr(None)["supervisor"]["cambios"], {"pred_ventaja": 11.0})

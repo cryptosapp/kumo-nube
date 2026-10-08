@@ -128,7 +128,7 @@ class Base:
 class EnElCiclo(unittest.TestCase):
     def setUp(self):
         from unittest import mock
-        self.p = [mock.patch.object(K.ia, "opinar_predicciones", lambda c, p: (OPS, "m", None)),
+        self.p = [mock.patch.object(K.ia, "opinar_predicciones", lambda c, p, *_: (OPS, "m", None)),
                   mock.patch.object(K, "http", lambda *a, **k: {"mercados": lista()}),
                   mock.patch.object(K, "url_nube", lambda: "https://nube")]
         for x in self.p:
@@ -192,7 +192,7 @@ class CicloAuto(unittest.TestCase):
                 mock.patch.object(K, "http", lambda *a, **k: {"mercados": lista()}), \
                 mock.patch.object(K, "url_nube", lambda: "https://nube"), \
                 mock.patch.object(K.ia, "opinar", lambda *a: ({}, None, None)), \
-                mock.patch.object(K.ia, "opinar_predicciones", lambda c, p: (OPS, "m", None)):
+                mock.patch.object(K.ia, "opinar_predicciones", lambda c, p, *_: (OPS, "m", None)):
             return K.ciclo(remoto), hl
 
     def test_proponer_no_toca_dinero(self):
@@ -239,7 +239,7 @@ class SoloCortoPlazo(unittest.TestCase):
                 mock.patch.object(K, "http", lambda *a, **k: {"mercados": lista(horas=horas, plazo=plazo)}), \
                 mock.patch.object(K, "url_nube", lambda: "https://nube"), \
                 mock.patch.object(K.ia, "opinar", lambda *a: ({}, None, None)), \
-                mock.patch.object(K.ia, "opinar_predicciones", lambda c, p: (OPS, "m", None)), \
+                mock.patch.object(K.ia, "opinar_predicciones", lambda c, p, *_: (OPS, "m", None)), \
                 mock.patch.object(K.ia, "chat_json", lambda m: (None, None, "x")):
             return K.ciclo(remoto), hl
 
@@ -258,3 +258,54 @@ class SoloCortoPlazo(unittest.TestCase):
         self.assertEqual(r["ordenes_nuevas"][0]["estado"], "ejecutada")
         r, hl = self.correr(200, pred_auto_solo_corto=False)
         self.assertEqual(r["ordenes_nuevas"][0]["estado"], "ejecutada")
+
+
+class MercadoGlobal(unittest.TestCase):
+    """Volatilidad 1 h / 24 h / 48 h y mercado global en la decisión."""
+
+    def test_turbulencia_global_exige_mas_ventaja(self):
+        # ventaja 11 (modelo 51 % vs precio 0.40): pasa con 8, no con 8 + 4 de turbulencia
+        glob = {"turbulencia": True, "resumen": "Turbulencia en BTC."}
+        nuevas, _, res = PR.proponer(CFG, lista(prob=51.0), [], [], 50, opinar_fijo(OPS), None, glob)
+        self.assertEqual((nuevas, res["candidatos"], res["turbulencia"]), ([], 0, True))
+        nuevas, notas, _ = PR.proponer(CFG, lista(prob=51.0), [], [], 50, opinar_fijo(OPS))
+        self.assertEqual(len(nuevas), 1)
+        _, notas, _ = PR.proponer(CFG, lista(prob=51.0), [], [], 50, opinar_fijo(OPS), None, glob)
+        self.assertTrue(any("turbulencia" in n for n in notas))
+
+    def test_turbulencia_del_subyacente(self):
+        m = mercado(prob=51.0)
+        m["regimen"] = "turbulento"
+        nuevas, _, _ = PR.proponer(CFG, [m], [], [], 50, opinar_fijo(OPS))
+        self.assertEqual(nuevas, [])
+        m["lados"][0]["ventaja"] = 13.0
+        nuevas, _, _ = PR.proponer(CFG, [m], [], [], 50, opinar_fijo(OPS))
+        self.assertEqual(len(nuevas), 1)
+
+    def test_la_ia_recibe_volatilidad_y_global(self):
+        from unittest import mock
+        m = mercado()
+        m.update({"mov": {"h1": 0.4, "h24": 2.1, "h48": 3.0}, "regimen": "normal", "cambio_1h_pct": 0.2})
+        visto = {}
+
+        def opinar(c, p, glob=None):
+            visto.update(cands=c, glob=glob)
+            return OPS, "m", None
+        glob = {"resumen": "24 h: cripto +1%, bolsa −0.4%.", "turbulencia": False}
+        with mock.patch.object(K.ia, "opinar_predicciones", opinar), \
+                mock.patch.object(K, "http", lambda *a, **k: {"mercados": [m], "global": glob}), \
+                mock.patch.object(K, "url_nube", lambda: "https://nube"):
+            nuevas, res = K.predicciones_ia(Base(ask=0.42), None, CFG, [], [], 50, [])
+        self.assertEqual(visto["glob"], glob)
+        self.assertEqual(visto["cands"][0]["mov_tipico_1h_24h_48h_pct"], [0.4, 2.1, 3.0])
+        self.assertEqual(res["global"], glob["resumen"])
+        self.assertEqual(len(nuevas), 1)
+
+    def test_prompt_lleva_el_global(self):
+        from unittest import mock
+        import ia
+        pedidos = []
+        with mock.patch.object(ia, "chat_json", lambda msgs: (pedidos.append(msgs[1]["content"]) or ({"opiniones": []}, "m", None))):
+            ia.opinar_predicciones([{"coin": "#1"}], [], {"resumen": "Aversión al riesgo."})
+        self.assertIn("Aversión al riesgo.", pedidos[0])
+        self.assertIn("1 h, 24 h", pedidos[0])

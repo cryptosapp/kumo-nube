@@ -146,14 +146,20 @@ def opinar(propuestas, contexto, vigilar=None):
     return out, modelo, None
 
 
-def opinar_predicciones(candidatos, posiciones):
+def opinar_predicciones(candidatos, posiciones, glob=None):
     """La IA revisa mercados de predicción con ventaja según el modelo y tus
-    posiciones. Devuelve ({"#N": {accion, confianza, prob, razon}}, modelo, error)."""
+    posiciones, con el mercado global como contexto.
+    Devuelve ({"#N": {accion, confianza, prob, razon}}, modelo, error)."""
     if not candidatos and not posiciones:
         return {}, None, None
     pedido = ("Mercados de predicción de Hyperliquid: cada unidad paga 1 USDC si acierta y 0 si no; el precio es la "
-              "probabilidad que da el mercado. «prob_modelo_pct» sale de un modelo log-normal con la volatilidad de 48 h "
-              "(no es certeza). Sé escéptico: el modelo ignora noticias y el mercado puede saber algo más.\n")
+              "probabilidad que da el mercado. «prob_modelo_pct» sale de un modelo log-normal con la volatilidad de 1 h, 24 h "
+              "y 48 h por tramos (no es certeza); «mov_tipico_1h_24h_48h_pct» es cuánto se mueve el subyacente normalmente y "
+              "«volatilidad» = turbulento si la última hora se mueve mucho más que lo normal. Sé escéptico: el modelo ignora "
+              "noticias y el mercado puede saber algo más.\n")
+    if glob and glob.get("resumen"):
+        pedido += (f"Mercado global ahora: {glob['resumen']} Úsalo en tu decisión: con aversión al riesgo o turbulencia sé más "
+                   "exigente con apuestas a que el precio suba o se mantenga quieto.\n")
     if candidatos:
         pedido += ("Candidatos para ENTRAR (el modelo les ve ventaja). Para cada uno: COMPRAR o NO ENTRAR.\n"
                    f"{json.dumps(candidatos, ensure_ascii=False)}\n")

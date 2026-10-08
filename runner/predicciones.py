@@ -141,11 +141,17 @@ def categoria(m):
     return f"cripto_{m.get('plazo')}" if m.get("categoria") == "cripto" else m.get("categoria") or "otro"
 
 
-def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None):
+# Puntos de ventaja extra que se exigen con turbulencia (la última hora se mueve
+# mucho más que lo normal: el modelo es menos fiable).
+EXTRA_TURBULENCIA = 4
+
+
+def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None, glob=None):
     """La IA revisa los mejores candidatos y tus posiciones. Devuelve
     (órdenes_nuevas, notas, resumen). Con `libro(cod, comprar)` cada candidato se
     comprueba contra el mejor precio REAL antes de gastar una consulta de IA, y la
-    orden sale con ese precio como límite.
+    orden sale con ese precio como límite. `glob` es el mercado global de la nube:
+    con turbulencia global (o del subyacente) se exige más ventaja.
     `opinar(candidatos, posiciones)` → ({coin: {accion, confianza, prob, razon}}, modelo, error)."""
     ventaja_min = float(cfg.get("pred_ventaja") or 8)
     monto, tope = float(cfg.get("pred_monto") or 11), float(cfg.get("pred_max_total") or 30)
@@ -162,13 +168,18 @@ def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None):
     por_mercado = {m["mercado"]: m for m in lista}
     notas, nuevas = [], []
 
-    elegibles = []
+    turb_global = bool((glob or {}).get("turbulencia"))
+    exigir = lambda m: ventaja_min + (EXTRA_TURBULENCIA if turb_global or m.get("regimen") == "turbulento" else 0)
+    elegibles, frenados = [], 0
     for m in lista:
         if m["mercado"] in abiertos or categoria(m) not in cats or m.get("sin_ofertas") or (m.get("horas") or 0) < horas_min:
             continue
         for ld in m["lados"]:
             if ld.get("precio") is not None and ld.get("prob_modelo") is not None and pmin <= ld["precio"] <= pmax and (ld.get("ventaja") or 0) >= ventaja_min:
-                elegibles.append((m, ld))
+                if ld["ventaja"] >= exigir(m):
+                    elegibles.append((m, ld))
+                else:
+                    frenados += 1
     elegibles.sort(key=lambda x: -x[1]["ventaja"])
     cands, revisados_libro = [], 0
     for m, ld in elegibles:
@@ -180,12 +191,15 @@ def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None):
             mejor = libro(int(ld["coin"][1:]), True)
             ask = mejor and mejor.get("precio")
             # Sin vendedores, o el precio real ya se comió la ventaja: no vale la pena preguntar.
-            if not ask or ask > ld["prob_modelo"] / 100 - ventaja_min / 200 or ask > ld["precio"] + 0.05:
+            if not ask or ask > ld["prob_modelo"] / 100 - exigir(m) / 200 or ask > ld["precio"] + 0.05:
                 continue
         cands.append({"coin": ld["coin"], "pregunta": m["pregunta"], "regla": m.get("regla"), "lado": ld["nombre"], "precio": ask or ld["precio"],
                       "prob_mercado_pct": round(ld["precio"] * 100, 1), "prob_modelo_pct": ld["prob_modelo"], "ventaja_pts": ld["ventaja"],
                       "subyacente": m.get("nombre_sub") or m.get("subyacente"), "precio_actual": m.get("precio_actual"), "objetivo": m.get("objetivo"),
-                      "distancia_pct": m.get("distancia_pct"), "horas_para_vencer": m.get("horas"), "cambio_24h_pct": m.get("cambio_24h_pct")})
+                      "distancia_pct": m.get("distancia_pct"), "horas_para_vencer": m.get("horas"), "cambio_1h_pct": m.get("cambio_1h_pct"),
+                      "cambio_24h_pct": m.get("cambio_24h_pct"), "cambio_48h_pct": m.get("cambio_48h_pct"),
+                      "mov_tipico_1h_24h_48h_pct": [m["mov"].get("h1"), m["mov"].get("h24"), m["mov"].get("h48")] if m.get("mov") else None,
+                      "volatilidad": m.get("regimen")})
 
     revisar = []
     for p in posiciones:
@@ -207,10 +221,14 @@ def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None):
                         "prob_mercado_pct": round(p["precio"] * 100, 1), "prob_modelo_pct": ld.get("prob_modelo"),
                         "ventaja_pts": ld.get("ventaja"),
                         "horas_para_vencer": (m and m.get("horas")) or (round((p["vence"] - time.time() * 1000) / 3_600_000, 1) if p.get("vence") else None),
-                        "precio_actual": m and m.get("precio_actual"), "objetivo": m and m.get("objetivo")})
+                        "precio_actual": m and m.get("precio_actual"), "objetivo": m and m.get("objetivo"),
+                        "cambio_1h_pct": m and m.get("cambio_1h_pct"), "cambio_24h_pct": m and m.get("cambio_24h_pct"), "volatilidad": m and m.get("regimen")})
 
     resumen = {"ts": int(time.time() * 1000), "revisados": len(lista), "elegibles": len(elegibles), "candidatos": len(cands), "posiciones": len(revisar),
-               "categorias": sorted(cats), "modelo": None, "opiniones": [], "modo": cfg.get("pred_ia", "proponer")}
+               "categorias": sorted(cats), "modelo": None, "opiniones": [], "modo": cfg.get("pred_ia", "proponer"),
+               "global": (glob or {}).get("resumen"), "turbulencia": turb_global}
+    if frenados:
+        notas.append(f"Predicciones: {frenados} lado{'s' if frenados != 1 else ''} con ventaja no alcanza{'n' if frenados != 1 else ''} lo que se exige con turbulencia (+{EXTRA_TURBULENCIA} puntos)")
     if elegibles and not cands and libro:
         notas.append(f"Predicciones: {len(elegibles)} mercados con ventaja en el modelo, pero en el libro real ya no la tienen (o no hay vendedores)")
     if not cands and not revisar:

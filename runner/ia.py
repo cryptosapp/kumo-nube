@@ -1,24 +1,65 @@
-"""Opinión de IA sobre las operaciones que propone la estrategia.
+"""IA de Kumo: varios proveedores gratuitos, respaldo en cadena y decisión por consenso.
 
-Sirve cualquier proveedor compatible con OpenAI (Kilo, Groq, Google AI Studio,
-OpenRouter, Mistral…). Se configura con los secretos IA_URL, IA_MODELOS (lista
-separada por comas) e IA_CLAVE (vacía en proveedores sin cuenta como Kilo).
-Las nubes antiguas solo tienen GROQ_API_KEY: entonces se usa Groq como antes.
+Todos hablan el formato de OpenAI (`/chat/completions`). La lista de proveedores, en
+orden de prioridad y con sus claves, la manda la nube en cada ciclo (`configurar`):
+primero las claves que pegaste, después la de la instalación y al final los gratuitos
+sin clave (Kilo, LLM7, OVH) como respaldo, para que la IA no quede caída si uno falla.
+Las nubes antiguas no mandan lista: entonces se usan los secretos IA_URL, IA_MODELOS e
+IA_CLAVE (o GROQ_API_KEY) como antes.
+
+- `chat_json(mensajes)`: cadena de respaldo. Prueba cada proveedor y modelo en orden;
+  un 429, un timeout o un JSON inválido pasan al siguiente.
+- `opinar` / `opinar_predicciones`: si el consenso está activo, preguntan a varias IAs
+  en paralelo (un modelo de cada proveedor primero) y votan. Si no, usan la cadena.
 """
 import json
 import os
 import re
+import statistics
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 GROQ_URL = "https://api.groq.com/openai/v1"
 GROQ_MODELOS = ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "llama-3.3-70b-versatile"]
 
+# Catálogo (igual que en la nube). `json`: qué formato de respuesta pedir.
+CATALOGO = {
+    "groq": {"url": GROQ_URL, "json": "schema"},
+    "gemini": {"url": "https://generativelanguage.googleapis.com/v1beta/openai", "max_tokens": 2048},
+    "openrouter": {"url": "https://openrouter.ai/api/v1"},
+    "cerebras": {"url": "https://api.cerebras.ai/v1", "json": "objeto"},
+    "mistral": {"url": "https://api.mistral.ai/v1", "json": "objeto"},
+    "kilo": {"url": "https://api.kilo.ai/api/gateway", "sin_clave": True, "max_tokens": 1500},
+    "llm7": {"url": "https://api.llm7.io/v1", "sin_clave": True},
+    "ovh": {"url": "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1", "sin_clave": True},
+}
+MAX_TOKENS = 2048
+TIMEOUT = 45
 
-# Modelo que respondió en la última prueba de la app (Config → semáforo). Se
-# prueba primero; los demás quedan de respaldo en su orden.
+# Modelo que respondió en la última prueba de la app (Config → semáforo): se prueba
+# primero dentro de su proveedor.
 PREFERIDO = None
+# Lista de proveedores que manda la nube: [{id, url, key, modelos}] (None = nube vieja).
+PROVEEDORES = None
+# Consenso: {"enabled": bool, "size": 2-5}.
+CONSENSO = {"enabled": False, "size": 3}
+
+
+def configurar(lista=None, consenso=None):
+    """La nube manda en cada ciclo la lista de proveedores (ya descifrada) y el consenso."""
+    global PROVEEDORES, CONSENSO
+    PROVEEDORES = [p for p in (lista or []) if p.get("url") and p.get("modelos")] or None
+    c = consenso or {}
+    CONSENSO = {"enabled": bool(c.get("enabled")), "size": max(2, min(5, int(c.get("size") or 3)))}
+
+
+def _id_de_url(url):
+    for k, v in CATALOGO.items():
+        if url.rstrip("/").startswith(v["url"]):
+            return k
+    return re.sub(r"^https?://(api\.)?", "", url).split("/")[0]
 
 
 def _ordenar(modelos):
@@ -28,7 +69,7 @@ def _ordenar(modelos):
 
 
 def proveedor():
-    """Devuelve (url_base, clave, [modelos], nombre) o None si no hay IA configurada."""
+    """El proveedor de los secretos de GitHub: (url, clave, [modelos], nombre) o None."""
     url = os.getenv("IA_URL", "").strip().rstrip("/")
     if url:
         modelos = [m.strip() for m in os.getenv("IA_MODELOS", "").split(",") if m.strip()]
@@ -40,29 +81,67 @@ def proveedor():
     return None
 
 
+def proveedores():
+    """[{id, url, key, modelos, nombre}] en orden de prioridad."""
+    if PROVEEDORES:
+        return [{**p, "url": p["url"].rstrip("/"), "modelos": _ordenar(list(p["modelos"])), "nombre": p.get("id") or _id_de_url(p["url"])}
+                for p in PROVEEDORES]
+    prov = proveedor()
+    if not prov:
+        return []
+    url, clave, modelos, nombre = prov
+    return [{"id": _id_de_url(url), "url": url, "key": clave, "modelos": modelos, "nombre": nombre}]
+
+
 def extraer_json(texto):
-    """Algunos modelos envuelven el JSON en ```json``` o en <think>…</think>."""
+    """Algunos modelos envuelven el JSON en ```json```, en <think>…</think> o en texto."""
     texto = re.sub(r"<think>.*?</think>", "", texto or "", flags=re.S).strip()
+    texto = re.sub(r"^```(?:json)?\s*|\s*```$", "", texto.strip())
     try:
         return json.loads(texto)
     except ValueError:
-        a, b = texto.find("{"), texto.rfind("}")
-        if a >= 0 and b > a:
-            return json.loads(texto[a:b + 1])
-        raise
+        # El primer objeto JSON completo (hay modelos que lo repiten o agregan texto o emojis).
+        a = texto.find("{")
+        while a >= 0:
+            try:
+                return json.JSONDecoder().raw_decode(texto[a:])[0]
+            except ValueError:
+                a = texto.find("{", a + 1)
+        raise ValueError("JSON inválido")
+
+
+# Esquema estricto para Groq (gpt-oss y qwen): un objeto con cualquier lista de opiniones.
+ESQUEMA = {"name": "respuesta", "strict": False, "schema": {"type": "object"}}
+
+
+def _cuerpo(url, modelo, mensajes, formato_json):
+    """Cada proveedor con lo suyo: Groq con json_schema y razonamiento corto (menos llama),
+    Mistral y Cerebras con json_object, los demás solo max_tokens."""
+    cat = CATALOGO.get(_id_de_url(url), {})
+    datos = {"model": modelo, "messages": mensajes, "temperature": 0.2, "max_tokens": cat.get("max_tokens", MAX_TOKENS)}
+    if formato_json:
+        modo = cat.get("json")
+        if modo == "schema" and "llama" not in modelo.lower():
+            datos["response_format"] = {"type": "json_schema", "json_schema": ESQUEMA}
+            datos["reasoning_effort"] = "low"
+        elif modo:
+            datos["response_format"] = {"type": "json_object"}
+    return datos
 
 
 def _llamar(url, clave, modelo, mensajes, formato_json=True):
-    datos = {"model": modelo, "messages": mensajes, "temperature": 0.2}
-    if formato_json:
-        datos["response_format"] = {"type": "json_object"}
-    cab = {"Content-Type": "application/json", "User-Agent": "kumo-bot/1.0"}
-    if clave:
+    datos = _cuerpo(url, modelo, mensajes, formato_json)
+    # Groq bloquea (error 1010) los user-agent que no parecen de una herramienta conocida.
+    cab = {"Content-Type": "application/json", "User-Agent": "curl/8.14.1" if url.startswith(GROQ_URL) else "kumo-bot/1.0"}
+    if clave:  # los gratuitos sin clave no llevan Authorization
         cab["Authorization"] = f"Bearer {clave}"
     req = urllib.request.Request(url + "/chat/completions", data=json.dumps(datos).encode(), method="POST", headers=cab)
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
         resp = json.loads(r.read().decode())
-    return resp["choices"][0]["message"]["content"]
+    contenido = ((resp.get("choices") or [{}])[0].get("message") or {}).get("content")
+    if not contenido or not str(contenido).strip():
+        raise ValueError("respuesta vacía")
+    return contenido
 
 
 # Bitácora de llamadas a la IA de este ciclo (se manda en el reporte para que la
@@ -75,35 +154,202 @@ def _anotar(proveedor_, modelo, ok, t0, error=None):
                 "ms": int((time.time() - t0) * 1000), "error": error})
 
 
+def _explicar(e):
+    if isinstance(e, urllib.error.HTTPError):
+        return "sin cuota (429)" if e.code == 429 else f"HTTP {e.code}"
+    if isinstance(e, TimeoutError) or "timed out" in str(e):
+        return "timeout"
+    if isinstance(e, ValueError):
+        return "respuesta vacía" if "vacía" in str(e) else "JSON inválido"
+    return type(e).__name__
+
+
+def preguntar(prov, modelo, mensajes):
+    """Una IA: (datos|None, error|None). Reintenta sin formato JSON si el modelo no lo acepta."""
+    for formato_json in (True, False):
+        t0 = time.time()
+        try:
+            datos = extraer_json(_llamar(prov["url"], prov.get("key") or "", modelo, mensajes, formato_json))
+            _anotar(prov["nombre"], modelo, True, t0)
+            return datos, None
+        except urllib.error.HTTPError as e:
+            _anotar(prov["nombre"], modelo, False, t0, _explicar(e))
+            if e.code == 400 and formato_json:
+                continue  # no acepta response_format: reintenta sin él
+            return None, (e.code, _explicar(e))
+        except Exception as e:  # red, timeout, JSON inválido, respuesta vacía
+            _anotar(prov["nombre"], modelo, False, t0, _explicar(e))
+            return None, (0, _explicar(e))
+    return None, (0, "error")
+
+
+def _candidatos():
+    """[(prov, modelo)] en orden de prioridad."""
+    return [(p, m) for p in proveedores() for m in p["modelos"]]
+
+
 def chat_json(mensajes):
-    """Prueba cada modelo hasta que uno responda JSON. Devuelve (dict, modelo, error)."""
-    prov = proveedor()
-    if not prov:
+    """Cadena de respaldo: el primer proveedor y modelo que responda JSON.
+    Devuelve (dict, modelo, error); `ULTIMO_RESPALDO` guarda de qué falló antes."""
+    global ULTIMO_RESPALDO
+    ULTIMO_RESPALDO = []
+    cands = _candidatos()
+    if not cands:
         return None, None, "Sin IA configurada"
-    url, clave, modelos, nombre = prov
-    if not modelos:
-        return None, None, f"Falta IA_MODELOS para {nombre}"
-    ultimo_error = None
-    for modelo in modelos:
-        for formato_json in (True, False):
-            t0 = time.time()
-            try:
-                datos = extraer_json(_llamar(url, clave, modelo, mensajes, formato_json))
-                _anotar(nombre, modelo, True, t0)
-                return datos, modelo, None
-            except urllib.error.HTTPError as e:
-                ultimo_error = f"{nombre} HTTP {e.code} con {modelo}"
-                _anotar(nombre, modelo, False, t0, f"HTTP {e.code}")
-                if e.code in (401, 403):
-                    return None, None, ultimo_error
-                if e.code == 400 and formato_json:
-                    continue  # el modelo no acepta response_format: reintenta sin él
-                break
-            except Exception as e:  # red, JSON inválido, etc.
-                ultimo_error = f"{nombre}: {type(e).__name__} con {modelo}"
-                _anotar(nombre, modelo, False, t0, type(e).__name__)
-                break
-    return None, None, ultimo_error
+    ultimo, caidos = None, set()
+    for prov, modelo in cands:
+        if prov["nombre"] in caidos:
+            continue
+        datos, err = preguntar(prov, modelo, mensajes)
+        if datos is not None:
+            return datos, modelo, None
+        codigo, texto = err
+        ultimo = f"{prov['nombre']} HTTP {codigo} con {modelo}" if codigo else f"{prov['nombre']}: {texto} con {modelo}"
+        ULTIMO_RESPALDO.append({"proveedor": prov["nombre"], "modelo": modelo, "error": texto})
+        if codigo in (401, 403) and prov.get("key"):
+            caidos.add(prov["nombre"])  # clave rechazada: sus otros modelos tampoco van a responder
+    return None, None, ultimo
+
+
+ULTIMO_RESPALDO = []
+
+
+def elegir_votantes(n):
+    """Un modelo de cada proveedor distinto primero (votos independientes y cuotas
+    separadas) y luego el resto, todo en orden de prioridad."""
+    primero, resto, vistos = [], [], set()
+    for prov, modelo in _candidatos():
+        (resto if prov["nombre"] in vistos else primero).append((prov, modelo))
+        vistos.add(prov["nombre"])
+    return primero + resto
+
+
+def consultar_varias(mensajes, n, valido=lambda d: True):
+    """Pregunta a `n` IAs en paralelo; si responde menos de la mitad, sigue una a una con
+    las siguientes (si no responde ninguna, esto es la cadena de respaldo). Una respuesta
+    que no trae ningún voto válido (`valido`) cuenta como fallida: «formato inválido».
+    Devuelve ([(etiqueta, datos)], [errores])."""
+    cola = elegir_votantes(n)
+    primeras, resto = cola[:n], cola[n:]
+    ok, errores = [], []
+
+    def una(pm):
+        prov, modelo = pm
+        return pm, preguntar(prov, modelo, mensajes)
+
+    def anotar(prov, modelo, datos, err):
+        if datos is not None and valido(datos):
+            ok.append((modelo, datos))
+        else:
+            errores.append({"proveedor": prov["nombre"], "modelo": modelo, "error": err[1] if err else "formato inválido"})
+
+    with ThreadPoolExecutor(max_workers=len(primeras) or 1) as ex:
+        for (prov, modelo), (datos, err) in ex.map(una, primeras):
+            anotar(prov, modelo, datos, err)
+    con_clave = {p["nombre"] for p, _ in cola if p.get("key")}
+    caidos = {e["proveedor"] for e in errores if e["error"] in ("HTTP 401", "HTTP 403") and e["proveedor"] in con_clave}
+    for prov, modelo in resto:
+        if len(ok) * 2 >= n:
+            break
+        if prov["nombre"] in caidos:
+            continue
+        datos, err = preguntar(prov, modelo, mensajes)
+        anotar(prov, modelo, datos, err)
+    return ok, errores
+
+
+def corto(modelo):
+    """«nvidia/nemotron-3-super-120b-a12b:free» → «nemotron-3-super-120b-a12b»."""
+    return str(modelo).split("/")[-1].replace(":free", "")
+
+
+def votar(votos, espera):
+    """votos = [(modelo, {accion, confianza, razon, prob?})] de UN activo.
+    Suma la confianza por acción (mínimo 0.01 por voto); gana la mayor y, si hay empate,
+    `espera` (ESPERAR / NO ENTRAR / MANTENER). Confianza final = media de quienes votaron
+    la ganadora × (0.5 + 0.5 × acuerdo): con 3/3 se conserva, con 2/3 baja un 17 %."""
+    if not votos:
+        return None
+    if len(votos) == 1:
+        return dict(votos[0][1])
+    suma = {}
+    for _, v in votos:
+        suma[v["accion"]] = suma.get(v["accion"], 0.0) + max(0.01, float(v.get("confianza") or 0))
+    mejor = max(suma.values())
+    ganadoras = [a for a, s in suma.items() if abs(s - mejor) < 1e-9]
+    accion = ganadoras[0] if len(ganadoras) == 1 else espera
+    a_favor = [v for _, v in votos if v["accion"] == accion]
+    acuerdo = len(a_favor) / len(votos)
+    media = statistics.mean(float(v.get("confianza") or 0) for v in a_favor) if a_favor else 0.0
+    conf = int(round(media * (0.5 + 0.5 * acuerdo)))
+    lider = max(a_favor, key=lambda v: float(v.get("confianza") or 0)) if a_favor else max((v for _, v in votos), key=lambda v: float(v.get("confianza") or 0))
+    detalle = ", ".join(f"{corto(m)} {v['accion']} {int(v.get('confianza') or 0)}" for m, v in votos)
+    out = {"accion": accion, "confianza": conf, "razon": f"Consenso {len(a_favor)}/{len(votos)} ({detalle}): {lider.get('razon', '')}"[:300],
+           "votos": [{"modelo": corto(m), "accion": v["accion"], "confianza": int(v.get("confianza") or 0)} for m, v in votos]}
+    if any("prob" in v for _, v in votos):
+        # La probabilidad final es la mediana, solo si al menos la mitad dio una; para
+        # comprar, solo de quienes no votaron vender.
+        probs = [v["prob"] for _, v in votos if v.get("prob") is not None and not (accion.startswith("COMPRAR") and v["accion"] == "VENDER")]
+        out["prob"] = statistics.median(probs) if probs and len(probs) * 2 >= len(votos) else None
+    return out
+
+
+def decidir(mensajes, leer, espera):
+    """Consenso si está activo y hay al menos 2 IAs; si no, cadena de respaldo.
+    `leer(datos)` → {clave: opinión}; `espera(clave)` = acción si hay empate.
+    Devuelve ({clave: opinión}, modelo, error)."""
+    n = CONSENSO["size"]
+    if not CONSENSO["enabled"] or len(_candidatos()) < 2:
+        datos, modelo, error = chat_json(mensajes)
+        return (leer(datos), modelo, None) if datos is not None else ({}, None, error)
+    ok, errores = consultar_varias(mensajes, n, lambda d: bool(leer(d)))
+    ia_errores = [e for e in errores if e["error"] == "formato inválido"]
+    for e in ia_errores:
+        LOG.append({"ts": int(time.time() * 1000), "proveedor": e["proveedor"], "modelo": e["modelo"], "ok": False, "ms": 0, "error": "formato inválido (no se contó su voto)"})
+    if not ok:
+        return {}, None, "Ninguna IA respondió: " + "; ".join(f"{e['proveedor']} {corto(e['modelo'])}: {e['error']}" for e in errores[:4])
+    if len(ok) == 1:
+        return leer(ok[0][1]), ok[0][0], None
+    porclave = {}
+    for modelo, datos in ok:
+        for k, v in leer(datos).items():
+            porclave.setdefault(k, []).append((modelo, v))
+    out = {k: votar(vs, espera(k)) for k, vs in porclave.items()}
+    return out, "consenso:" + "+".join(corto(m) for m, _ in ok), None
+
+
+def _filas(datos, clave):
+    """Las opiniones vengan como vengan: {"opiniones":[…]}, otra lista de objetos o un
+    diccionario por activo ({"BTC": {"senal": …}}). Cada fila lleva `clave` y «accion»."""
+    if not isinstance(datos, dict):
+        return []
+    filas = datos.get("opiniones")
+    if not isinstance(filas, list):
+        filas = next((v for v in datos.values() if isinstance(v, list) and v and isinstance(v[0], dict)), None)
+    if filas is None:
+        filas = [{clave: k, **v} for k, v in datos.items() if isinstance(v, dict)]
+    out = []
+    for f in filas:
+        if isinstance(f, dict):
+            acc = next((f[k] for k in ("accion", "acción", "senal", "señal", "action", "decision") if f.get(k)), None)
+            out.append({**f, "accion": acc})
+    return out
+
+
+def _leer_opiniones(datos):
+    out = {}
+    for o in _filas(datos, "simbolo"):
+        try:
+            sym = str(o.get("simbolo", "")).upper()
+            if sym:
+                acc = str(o.get("accion") or "ESPERAR").upper().strip()
+                acc = {"BUY": "COMPRAR", "SELL": "VENDER", "HOLD": "ESPERAR", "MANTENER": "ESPERAR"}.get(acc, acc)
+                if acc not in ("COMPRAR", "VENDER", "ESPERAR"):
+                    continue
+                out[sym] = {"accion": acc, "confianza": max(0, min(100, int(float(o.get("confianza", 0) or 0)))), "razon": str(o.get("razon", ""))[:200]}
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return out
 
 
 def opinar(propuestas, contexto, vigilar=None):
@@ -132,23 +378,30 @@ def opinar(propuestas, contexto, vigilar=None):
             'Formato: {"opiniones":[{"simbolo":"BTC","accion":"ESPERAR","confianza":60,"razon":"..."}]}'
         )},
     ]
-    datos, modelo, error = chat_json(mensajes)
-    if datos is None:
-        return {}, None, error
+    return decidir(mensajes, _leer_opiniones, lambda s: "ESPERAR")
+
+
+VALIDAS_PRED = {"COMPRAR", "NO ENTRAR", "MANTENER", "VENDER", "COMPRAR MÁS"}
+
+
+def _leer_pred(datos):
     out = {}
-    for o in datos.get("opiniones", []) if isinstance(datos, dict) else []:
+    for o in _filas(datos, "coin"):
         try:
-            sym = str(o.get("simbolo", "")).upper()
-            if sym:
-                out[sym] = {"accion": str(o.get("accion", "ESPERAR")).upper(), "confianza": max(0, min(100, int(float(o.get("confianza", 0) or 0)))), "razon": str(o.get("razon", ""))[:200]}
+            coin, acc = str(o.get("coin", "")).strip(), str(o.get("accion") or "").upper().strip().replace("COMPRAR MAS", "COMPRAR MÁS")
+            if not re.match(r"^#\d+$", coin) or acc not in VALIDAS_PRED:
+                continue
+            prob = o.get("prob")
+            out[coin] = {"accion": acc, "confianza": max(0, min(100, int(float(o.get("confianza", 0) or 0)))),
+                         "prob": max(0.0, min(100.0, float(prob))) if prob not in (None, "") else None, "razon": str(o.get("razon", ""))[:200]}
         except (AttributeError, TypeError, ValueError):
             continue
-    return out, modelo, None
+    return out
 
 
-def opinar_predicciones(candidatos, posiciones, glob=None):
+def opinar_predicciones(candidatos, posiciones, glob=None, noticias=None):
     """La IA revisa mercados de predicción con ventaja según el modelo y tus
-    posiciones, con el mercado global como contexto.
+    posiciones, con el mercado global y las noticias de 24 h como contexto.
     Devuelve ({"#N": {accion, confianza, prob, razon}}, modelo, error)."""
     if not candidatos and not posiciones:
         return {}, None, None
@@ -160,6 +413,8 @@ def opinar_predicciones(candidatos, posiciones, glob=None):
     if glob and glob.get("resumen"):
         pedido += (f"Mercado global ahora: {glob['resumen']} Úsalo en tu decisión: con aversión al riesgo o turbulencia sé más "
                    "exigente con apuestas a que el precio suba o se mantenga quieto.\n")
+    if noticias:
+        pedido += f"Titulares de las últimas 24 h: {json.dumps(noticias[:12], ensure_ascii=False)}\n"
     if candidatos:
         pedido += ("Candidatos para ENTRAR (el modelo les ve ventaja). Para cada uno: COMPRAR o NO ENTRAR.\n"
                    f"{json.dumps(candidatos, ensure_ascii=False)}\n")
@@ -173,19 +428,5 @@ def opinar_predicciones(candidatos, posiciones, glob=None):
         {"role": "user", "content": pedido + 'Para cada «coin» da confianza 0-100, tu probabilidad de que ESE lado acierte (prob 0-100) y una razón breve (máx. 20 palabras).\n'
                                              'Formato: {"opiniones":[{"coin":"#90170","accion":"NO ENTRAR","confianza":60,"prob":55,"razon":"..."}]}'},
     ]
-    datos, modelo, error = chat_json(mensajes)
-    if datos is None:
-        return {}, None, error
-    validas = {"COMPRAR", "NO ENTRAR", "MANTENER", "VENDER", "COMPRAR MÁS"}
-    out = {}
-    for o in datos.get("opiniones", []) if isinstance(datos, dict) else []:
-        try:
-            coin, acc = str(o.get("coin", "")).strip(), str(o.get("accion", "")).upper().strip().replace("COMPRAR MAS", "COMPRAR MÁS")
-            if not re.match(r"^#\d+$", coin) or acc not in validas:
-                continue
-            prob = o.get("prob")
-            out[coin] = {"accion": acc, "confianza": max(0, min(100, int(float(o.get("confianza", 0) or 0)))),
-                         "prob": max(0.0, min(100.0, float(prob))) if prob not in (None, "") else None, "razon": str(o.get("razon", ""))[:200]}
-        except (AttributeError, TypeError, ValueError):
-            continue
-    return out, modelo, None
+    en_cartera = {p.get("coin") for p in posiciones or []}
+    return decidir(mensajes, _leer_pred, lambda c: "MANTENER" if c in en_cartera else "NO ENTRAR")

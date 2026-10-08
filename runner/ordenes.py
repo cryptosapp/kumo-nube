@@ -21,6 +21,14 @@ def minimo_spot(costo):
     return costo * (1 + MARGEN_SPOT) if costo and costo > 0 else None
 
 
+# Ventas que el candado frenó en este ciclo (van al reporte como «loss_sell_block»).
+BLOQUEOS = []
+
+
+def _bloqueo(que, motivo):
+    BLOQUEOS.append({"ts": int(time.time() * 1000), "que": str(que)[:90], "motivo": str(motivo)[:200]})
+
+
 def _cantidad_venta(o, saldos):
     pct = max(1.0, min(100.0, float(o.get("pct") or 100)))
     return saldos.get(o["simbolo"], 0.0) * pct / 100
@@ -47,6 +55,7 @@ def _pagar_con(ex, o, cfg, costo):
     entrada = (getattr(ex, "entradas", None) or {}).get(moneda)
     minimo = minimo_spot(entrada)
     if minimo and precio < minimo:
+        _bloqueo(f"Vender {moneda} para pagar una predicción", f"vale {precio:.4g} y la compraste a {entrada:.4g} (P/L {(precio / entrada - 1) * 100:+.2f} %)")
         return None, None, (f"No pagué con {moneda}: vale {precio:.4g} y la compraste a {entrada:.4g}; venderla sería con pérdida. "
                             "Pon USDC o espera. No se movió nada.")
     vender_usdc = max((costo - usdc) * 1.02 + 0.05, MIN_SPOT_HL)
@@ -118,8 +127,10 @@ def ejecutar_prediccion(ex, o, simulado, cfg=None, mercados=None):
         escala = escala_comision(ex._info_hl, cod // 10) if costo and hasattr(ex, "_info_hl") else 0.0
         minimo = precio_minimo_venta(costo, escala)
         if minimo is None and o.get("origen") == "ia":
+            _bloqueo(o.get("etiqueta") or o["coin"], "costo desconocido")
             return {**upd, "estado": "error", "error": "No vendí: no sé a cuánto compraste esta predicción y la IA no vende si puede haber pérdida."}, None
         if minimo is not None and lim < minimo:
+            _bloqueo(o.get("etiqueta") or o["coin"], f"límite {lim:g} bajo el mínimo sin pérdida {minimo:g} (costo {costo:.4g})")
             return {**upd, "estado": "error", "error": f"No vendí: la compraste a {costo:.4g} y vender a {lim:g} sería con pérdida (sin pérdida desde {minimo:g}, comisión incluida). "
                                                        "Si quieres vender igual, crea la venta marcando «vender aunque sea con pérdida».", "min_venta": minimo}, None
     op_pago, nota_pago = None, None
@@ -195,9 +206,11 @@ def ejecutar(ex, o, saldos, precios, costos, cfg, simulado, mercados=None):
             costo, minimo = c.get("costo"), None
             if cfg.get("nunca_vender_con_perdida", True) and not o.get("permitir_perdida"):
                 if o.get("origen") == "ia" and (not costo or c.get("estimado")):
+                    _bloqueo(f"Vender {sym}", f"costo {'estimado' if costo else 'desconocido'}")
                     return {**upd, "estado": "error", "error": f"No vendí: no sé a cuánto compraste {sym} (costo {'estimado' if costo else 'desconocido'}) y la IA no vende si puede haber pérdida."}, None
                 minimo = minimo_spot(costo)
                 if minimo and precio < minimo:
+                    _bloqueo(f"Vender {sym}", f"P/L {(precio / costo - 1) * 100:+.2f} % (mínimo +{MARGEN_SPOT * 100:g} %)")
                     return {**upd, "estado": "aprobada", "nota": f"Sería con pérdida o sin cubrir comisión ({(precio / costo - 1) * 100:+.1f}%; sin pérdida desde {minimo:.6g}): espero o marca «vender aunque pierda»"}, None
             r = ex.vender(sym, cant, minimo)
     except ErrorExchange as e:

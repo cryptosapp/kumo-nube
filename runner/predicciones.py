@@ -22,6 +22,7 @@ TRADUCE = {"Yes": "Sí", "No": "No", "template:Yes": "Sí", "template:No": "No"}
 # Vender nunca con pérdida: el precio mínimo cubre lo que pagaste más la comisión de
 # Hyperliquid al vender (~0.15 %) y un poco de redondeo.
 COMISION_VENTA = 0.003
+MARGEN_MIN = 0.005  # ninguna venta automática con P/L menor a +0.5 %
 
 # Mínimo por orden en predicciones: ~1 USDC (los 10 USDC son de spot). Hyperliquid no
 # lo publica; en el libro hay cientos de órdenes de 1.00-1.05 USDC y muchas de menos de 10.
@@ -59,7 +60,8 @@ def precio_minimo_venta(costo, escala=0.0):
     `escala` = deployerFeeScale del mercado: con 1.0 la comisión es el doble."""
     if not costo or costo <= 0:
         return None
-    com = COMISION_VENTA * (1 + max(0.0, escala or 0.0))
+    # Al menos +0.5 % de P/L (regla del candado), o la comisión si es mayor.
+    com = max(MARGEN_MIN, COMISION_VENTA * (1 + max(0.0, escala or 0.0)))
     return min(0.999, math.ceil(round(max(costo * (1 + com), costo + 0.001) * 10000, 6)) / 10000)
 
 

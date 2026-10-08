@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import estrategia as E  # noqa: E402
 import ia  # noqa: E402
+import noticias as N  # noqa: E402
 import ordenes as O  # noqa: E402
 import predicciones as PR  # noqa: E402
 import supervisor as SUP  # noqa: E402
@@ -105,6 +106,10 @@ def ciclo(remoto, parcial=None):
     parcial = parcial if parcial is not None else {}
     cfg = {**E.CONFIG_DEFECTO, **(remoto.get("config") or {})}
     ia.PREFERIDO = remoto.get("ia_pref") or None
+    # Proveedores de IA (con sus claves, ya descifradas) y consenso: los manda la nube.
+    ia.configurar(remoto.get("ia_proveedores"), remoto.get("ia_consenso"))
+    ia.LOG.clear()
+    O.BLOQUEOS.clear()
     estado = remoto.get("estado_runner") or {}
     quote = cfg["quote"].upper()
     exchange_id = os.getenv("EXCHANGE_ID", "kraken").strip().lower() or "kraken"
@@ -194,7 +199,25 @@ def ciclo(remoto, parcial=None):
     propuestas, notas_e = E.proponer(cfg, saldos, precios, ind, costos)
     notas += notas_e
 
+    # Mercado global (de la nube, el mismo que ve la app) y titulares de 24 h para la IA.
+    glob, titulares = None, []
+    if cfg["ia"] != "off":
+        mercados_pred()
+        glob = cache_pred.get("glob")
+        try:
+            titulares = N.titulares()
+        except Exception as e:  # las noticias nunca tumban el ciclo
+            notas.append(f"Noticias: {type(e).__name__}")
+    # Con turbulencia o aversión al riesgo se exige más confianza para comprar (+5).
+    if glob and (glob.get("turbulencia") or glob.get("tono") == "bajista"):
+        cfg = {**cfg, "ia_conf_min": float(cfg.get("ia_conf_min") or 65) + 5,
+               "pred_conf_min": float(cfg.get("pred_conf_min") if cfg.get("pred_conf_min") is not None else cfg.get("ia_conf_min") or 65) + 5}
+        notas.append(f"Mercado {'turbulento' if glob.get('turbulencia') else 'con aversión al riesgo'}: la IA necesita +5 de confianza para comprar")
     contexto = {"exchange": exchange_id, "quote": quote, "mercado": {s: {**mercado.get(s, {}), **ind.get(s, {})} for s in simbolos if s in precios}}
+    if glob and glob.get("resumen"):
+        contexto["mercado_global"] = glob["resumen"]
+    if titulares:
+        contexto["noticias_24h"] = titulares
     # La IA opina de las propuestas y además da su señal de las monedas del reparto
     # y las que tienes, para que la app muestre en cada ciclo qué está pensando.
     vigilar = [s for s in simbolos if s in precios][:8]
@@ -266,7 +289,7 @@ def ciclo(remoto, parcial=None):
                 libre_p += saldos[pagar] * ((ex.precios([pagar]).get(pagar) or {}).get("precio") or 0) * 0.97
             except ErrorExchange:
                 pass
-        nuevas_p, pred_ia = predicciones_ia(base, ex, cfg, preds, pendientes, libre_p, notas, mercados_pred, cache_pred)
+        nuevas_p, pred_ia = predicciones_ia(base, ex, cfg, preds, pendientes, libre_p, notas, mercados_pred, cache_pred, titulares)
         for o in nuevas_p:
             if cfg.get("pred_ia") == "auto" and not cfg["pausado"]:
                 # «Solo corto plazo»: lo que vence más lejos queda como propuesta para que tú decidas.
@@ -333,6 +356,9 @@ def ciclo(remoto, parcial=None):
         "graficas": graf,
         "predicciones": preds, "valor_predicciones": valor_preds, "pred_ia": pred_ia,
         "supervisor": revision,
+        # Ventas que el candado frenó (P/L < +0.5 % o costo desconocido): se ven en la bitácora.
+        "bloqueos_perdida": O.BLOQUEOS[-10:],
+        "ia_consenso": {**ia.CONSENSO, "proveedores": [p["nombre"] for p in ia.proveedores()]},
     }
 
 
@@ -345,7 +371,7 @@ def solo_corto_ok(cfg, o):
     return h is not None and h <= float(cfg.get("pred_corto_horas") or 36)
 
 
-def predicciones_ia(base, ex, cfg, preds, pendientes, libre, notas, mercados_pred=None, cache=None):
+def predicciones_ia(base, ex, cfg, preds, pendientes, libre, notas, mercados_pred=None, cache=None, titulares=None):
     """Pide a la IA sus órdenes de predicción. Los mercados (con el modelo) vienen de
     la nube; cada orden lleva como límite el mejor precio REAL del libro (no el
     precio medio, que casi nunca se llena). Devuelve (órdenes, resumen)."""
@@ -358,7 +384,7 @@ def predicciones_ia(base, ex, cfg, preds, pendientes, libre, notas, mercados_pre
         else:
             datos = http("GET", url_nube() + "/runner/predicciones", os.getenv("KUMO_RUNNER_TOKEN", ""))
             lista, glob = datos.get("mercados") or [], datos.get("global")
-        nuevas, notas_p, resumen = PR.proponer(cfg, lista, preds, pendientes, libre, lambda c, p: ia.opinar_predicciones(c, p, glob),
+        nuevas, notas_p, resumen = PR.proponer(cfg, lista, preds, pendientes, libre, lambda c, p: ia.opinar_predicciones(c, p, glob, titulares),
                                                base.mejor_precio_prediccion, glob)
     except Exception as e:  # nunca debe tumbar el ciclo
         notas.append(f"IA predicciones: {type(e).__name__}")

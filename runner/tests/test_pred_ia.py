@@ -299,7 +299,7 @@ class MercadoGlobal(unittest.TestCase):
         m.update({"mov": {"h1": 0.4, "h24": 2.1, "h48": 3.0}, "regimen": "normal", "cambio_1h_pct": 0.2})
         visto = {}
 
-        def opinar(c, p, glob=None):
+        def opinar(c, p, glob=None, noticias=None):
             visto.update(cands=c, glob=glob)
             return OPS, "m", None
         glob = {"resumen": "24 h: cripto +1%, bolsa −0.4%.", "turbulencia": False}
@@ -332,7 +332,7 @@ class SinPerdidas(unittest.TestCase):
     VENDE = {"#90171": {"accion": "VENDER", "confianza": 90, "prob": 20, "razon": "cambió el panorama"}}
 
     def test_precio_minimo(self):
-        self.assertEqual(PR.precio_minimo_venta(0.7253), 0.7275)  # +0.3 % de comisión, redondeado hacia arriba
+        self.assertEqual(PR.precio_minimo_venta(0.7253), 0.729)  # +0.5 % (candado: P/L mínimo), redondeado hacia arriba
         self.assertEqual(PR.precio_minimo_venta(0.2), 0.201)  # al menos +0.001
         self.assertIsNone(PR.precio_minimo_venta(None))
 
@@ -363,7 +363,7 @@ class SinPerdidas(unittest.TestCase):
         op = opinar_fijo({})
         PR.proponer({**CFG, "pred_categorias": []}, lista(), self.pos(0.69, 0.7253), [], 50, op)
         r = op.llamadas[0][1][0]
-        self.assertEqual((r["pagaste"], r["vender_solo_desde"], r["puede_vender_sin_perdida"]), (0.7253, 0.7275, False))
+        self.assertEqual((r["pagaste"], r["vender_solo_desde"], r["puede_vender_sin_perdida"]), (0.7253, 0.729, False))
 
     def test_en_el_ciclo_el_mejor_comprador_por_debajo_no_vende(self):
         from unittest import mock
@@ -425,7 +425,7 @@ class CreadoresExternos(unittest.TestCase):
         return self.META if c["type"] == "outcomeMeta" else {"#75811": "0.9", "#73520": "0.5"}
 
     def test_minimo_con_comision_doble(self):
-        self.assertEqual(PR.precio_minimo_venta(0.7253), 0.7275)
+        self.assertEqual(PR.precio_minimo_venta(0.7253), 0.729)
         self.assertEqual(PR.precio_minimo_venta(0.7253, 1.0), 0.7297)
 
     def test_describir_muestra_creador(self):

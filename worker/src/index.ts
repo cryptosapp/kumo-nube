@@ -266,6 +266,9 @@ function limpiarPrediccion(base: Json, c: Json, config: Json): { orden?: Json; e
   if (c.etiqueta !== undefined) o.etiqueta = String(c.etiqueta).slice(0, 90);
   if (c.pagar_con !== undefined) { const m = c.pagar_con ? limpiarSimbolo(c.pagar_con) : ''; if (m) o.pagar_con = m; else delete o.pagar_con; } // 'USDC' = esta orden solo con USDC
   if (c.razon !== undefined) o.razon = String(c.razon).slice(0, 240);
+  // Vender con pérdida solo si TÚ lo marcas a propósito (el runner lo bloquea si no).
+  if (c.permitir_perdida !== undefined) { if (c.permitir_perdida === true && o.accion === 'VENDER') o.permitir_perdida = true; else delete o.permitir_perdida; }
+  if (o.accion !== 'VENDER') delete o.permitir_perdida;
   o.quote = config.quote; delete o.monto; delete o.pct;
   return { orden: o };
 }
@@ -974,19 +977,20 @@ async function prediccionPedir(env: Env, c: Json): Promise<Response> {
     ahora: m.precio_actual ?? undefined, regla: m.regla || undefined, mov_1h_24h_48h_pct: m.mov ? [m.mov.h1, m.mov.h24, m.mov.h48] : undefined,
     cambio_1h_24h_pct: m.mov ? [m.cambio_1h_pct, m.cambio_24h_pct] : undefined, turbulento: m.regimen === 'turbulento' || undefined,
     lados: m.lados.map((l: Json) => ({ coin: l.coin, lado: l.nombre, precio: l.precio, modelo_pct: l.prob_modelo ?? undefined, ventaja: l.ventaja ?? undefined })) }));
-  const pos = mias.map((p) => ({ coin: '#' + String(p.coin).slice(1), q: p.pregunta, lado: p.lado_nombre, unidades: p.cantidad, precio: p.precio }));
+  const pos = mias.map((p) => ({ coin: '#' + String(p.coin).slice(1), q: p.pregunta, lado: p.lado_nombre, unidades: p.cantidad, precio: p.precio,
+    pagaste: p.costo ?? undefined, vender_solo_desde: p.min_venta ?? undefined }));
   const t0 = Date.now(), ahora = Date.now();
   let d: Json, modelo: string;
   try {
     ({ datos: d, modelo } = await iaChat(env, [
       { role: 'system', content: 'Preparas órdenes en mercados de predicción de Hyperliquid para un usuario principiante. Prudente: si nada convence, no propongas nada y explícalo. Nunca inventas mercados: usa solo los «coin» de la lista. Respondes SOLO JSON válido en español.' },
       { role: 'user', content: `El usuario pide: "${instruccion}"
-Cada unidad paga 1 USDC si acierta y 0 si no; el precio es la probabilidad del mercado. «modelo_pct» es un modelo estadístico con la volatilidad de 1 h, 24 h y 48 h (no es certeza); «ventaja» = modelo − precio en puntos; «mov_1h_24h_48h_pct» = movimiento típico del subyacente.
+Cada unidad paga 1 USDC si acierta y 0 si no; «precio» es el precio MEDIO (la compra real se paga al vendedor más barato, que puede ser bastante más caro; Kumo lo comprueba). «modelo_pct» es un modelo estadístico con la volatilidad de 1 h, 24 h y 48 h (no es certeza); «ventaja» = modelo − precio en puntos; «mov_1h_24h_48h_pct» = movimiento típico del subyacente.
 Mercado global: ${lista0.global?.resumen || 'sin datos'} Tenlo en cuenta (con turbulencia sé más exigente).
 USDC libres: ${libre ?? 'desconocido'}.${config.pred_pagar_con ? ` Si falta USDC, Kumo vende ${config.pred_pagar_con} para pagar (tiene ${(estado.ultimo?.activos || []).find((a: Json) => a.simbolo === config.pred_pagar_con)?.valor ?? '?'} USDC en ${config.pred_pagar_con}).` : ''} Por compra suele usar ${config.pred_monto} USDC (mínimo 10). Tope total en predicciones: ${config.pred_max_total} USDC.
 Sus posiciones: ${JSON.stringify(pos)}
 Mercados abiertos (los más relevantes a su pedido): ${JSON.stringify(filas)}
-Propón como mucho 3 órdenes. COMPRAR lleva "monto_usdc"; VENDER (solo de sus posiciones) lleva "unidades".
+Propón como mucho 3 órdenes. COMPRAR lleva "monto_usdc"; VENDER (solo de sus posiciones) lleva "unidades". REGLA DEL USUARIO: nunca vender con pérdida; VENDER solo si el precio llega a «vender_solo_desde».
 Formato: {"respuesta":"2-4 frases para el usuario","propuestas":[{"coin":"#90170","accion":"COMPRAR","monto_usdc":11,"unidades":null,"confianza":70,"razon":"máx. 25 palabras"}]}` },
     ]));
   } catch (e: any) {
@@ -1011,6 +1015,19 @@ Formato: {"respuesta":"2-4 frases para el usuario","propuestas":[{"coin":"#90170
     const nivel = ((libro?.levels || [[], []])[accion === 'COMPRAR' ? 1 : 0] || [])[0];
     if (!nivel) { descartadas.push(`${etiqueta}: ahora no hay ${accion === 'COMPRAR' ? 'vendedores' : 'compradores'}`); continue; }
     const px = Number(nivel.px);
+    // Vender: nunca por debajo de lo que pagaste (comisión incluida), por mínima que sea la pérdida.
+    if (accion === 'VENDER') {
+      if (mia!.min_venta == null) { descartadas.push(`${etiqueta}: no sé a cuánto la compraste (espera al próximo ciclo): no vendo para no arriesgar una pérdida`); continue; }
+      if (px < mia!.min_venta) { descartadas.push(`${etiqueta}: el mejor comprador paga ${px} y la compraste a ${mia!.costo}: no vendo con pérdida (sin pérdida desde ${mia!.min_venta})`); continue; }
+    }
+    // El «precio» de la lista es el medio; se paga el del vendedor más barato. Si a ese
+    // precio el modelo ya no ve ventaja, la compra es mala aunque la IA la vea barata.
+    let aviso = '';
+    if (accion === 'COMPRAR' && ref) {
+      const pm = ref.l.prob_modelo != null ? ref.l.prob_modelo / 100 : null;
+      if (pm != null && px >= pm - 0.02) { descartadas.push(`${etiqueta}: el vendedor más barato pide ${px} y el modelo le da ${ref.l.prob_modelo}%: a ese precio no hay ventaja`); continue; }
+      if (ref.l.precio != null && px > ref.l.precio + 0.05) aviso = `Ojo: el precio medio es ${ref.l.precio} pero el vendedor más barato pide ${px} (libro con pocas ofertas).`;
+    }
     const monto = Math.min(Math.max(10, Number(x.monto_usdc) || config.pred_monto || 11), config.pred_max_total || 30);
     const unidades = accion === 'COMPRAR' ? Math.max(1, Math.ceil(monto / px)) : Math.min(Math.floor(mia!.cantidad), Math.max(1, Math.floor(Number(x.unidades) || mia!.cantidad)));
     if (accion === 'COMPRAR' && expuesto + unidades * px > (config.pred_max_total || 30) + 0.5) {
@@ -1019,7 +1036,7 @@ Formato: {"respuesta":"2-4 frases para el usuario","propuestas":[{"coin":"#90170
     const v = limpiarPrediccion({}, { coin, accion, unidades, limite: px, etiqueta, razon: String(x.razon || ''), pagar_con: accion === 'COMPRAR' ? config.pred_pagar_con : '' }, config);
     if (!v.orden) { descartadas.push(`${etiqueta}: ${v.error}`); continue; }
     const conf = Math.max(0, Math.min(100, Number(x.confianza) || 0));
-    const n: Json = { ...v.orden, id: nuevoId('iap'), ts: ahora, origen: 'ia', estado: 'propuesta', confianza: conf,
+    const n: Json = { ...v.orden, id: nuevoId('iap'), ts: ahora, origen: 'ia', estado: 'propuesta', confianza: conf, ...(aviso ? { aviso } : {}),
       ia: { accion, confianza: conf, razon: String(x.razon || '').slice(0, 240) },
       vence: Math.min(ahora + 2 * 3600_000, ref?.m.vence || Infinity),
       historia: [{ ts: ahora, quien: 'ia', texto: `Propuesta al pedirle «${instruccion.slice(0, 80)}»: ${String(x.razon || '').slice(0, 160)}` }] };

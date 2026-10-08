@@ -165,7 +165,8 @@ def opinar_predicciones(candidatos, posiciones, glob=None):
                    f"{json.dumps(candidatos, ensure_ascii=False)}\n")
     if posiciones:
         pedido += ("Posiciones que YA tiene el usuario. Para cada una: MANTENER (hasta el vencimiento), VENDER (cerrar ahora) "
-                   "o COMPRAR MÁS (solo si la señal es fuerte y el precio sigue barato).\n"
+                   "o COMPRAR MÁS (solo si la señal es fuerte y el precio sigue barato). REGLA DEL USUARIO: nunca vender con pérdida, "
+                   "por mínima que sea; VENDER solo si «puede_vender_sin_perdida» es true (precio ≥ «vender_solo_desde»). Si no, MANTENER.\n"
                    f"{json.dumps(posiciones, ensure_ascii=False)}\n")
     mensajes = [
         {"role": "system", "content": "Eres un analista prudente de mercados de predicción. Respondes SOLO JSON válido en español."},

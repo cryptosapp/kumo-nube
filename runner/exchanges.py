@@ -74,6 +74,7 @@ class CcxtExchange:
         self._cuenta_lista = exchange_id not in BILLETERA
         self.aviso_cuenta = None  # explicación para el usuario si se corrigió la dirección
         self.predicciones = {}  # {"+N": cantidad} de mercados de predicción (Hyperliquid)
+        self.entradas = {}  # {"+N": precio promedio de compra}
 
     def _info_hl(self, cuerpo):
         req = urllib.request.Request("https://api.hyperliquid.xyz/info", data=json.dumps(cuerpo).encode(),
@@ -141,6 +142,12 @@ class CcxtExchange:
         saldos = {k.upper(): _f(v) for k, v in total.items() if _f(v) > 0}
         # Hyperliquid: los mercados de predicción («+N») no son monedas; van aparte.
         saldos, self.predicciones = separar(saldos)
+        # Hyperliquid da lo que pagaste por cada token («entryNtl»): precio promedio de compra.
+        self.entradas = {}
+        for x in ((b.get("info") or {}).get("balances") or []) if isinstance(b.get("info"), dict) else []:
+            coin, tot, ntl = str(x.get("coin") or "").upper(), _f(x.get("total")), _f(x.get("entryNtl"))
+            if coin in self.predicciones and tot > 0 and ntl > 0:
+                self.entradas[coin] = ntl / tot
         return saldos
 
     def saldo_perps(self):

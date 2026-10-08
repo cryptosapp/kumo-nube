@@ -96,7 +96,8 @@ class Proponer(unittest.TestCase):
         self.assertEqual(len(nuevas), 2)
 
     def test_vende_posicion(self):
-        pos = [{"coin": "+90171", "valor": 6, "precio": 0.6, "cantidad": 10.0, "pregunta": "¿SOL ≥ 120?", "lado_nombre": "No", "vence": AHORA + 3600_000}]
+        pos = [{"coin": "+90171", "valor": 6, "precio": 0.6, "cantidad": 10.0, "pregunta": "¿SOL ≥ 120?", "lado_nombre": "No", "vence": AHORA + 3600_000,
+                "costo": 0.5, "min_venta": PR.precio_minimo_venta(0.5)}]
         op = opinar_fijo({"#90171": {"accion": "VENDER", "confianza": 75, "prob": 10, "razon": "SOL muy arriba"}})
         nuevas, _, res = PR.proponer(CFG, lista(), pos, [], 50, op)
         self.assertEqual([(o["coin"], o["accion"], o["unidades"]) for o in nuevas], [("#90171", "VENDER", 10)])
@@ -107,7 +108,8 @@ class Proponer(unittest.TestCase):
         self.assertEqual(op.llamadas, [])  # no revisa tus posiciones si lo apagas
 
     def test_asegurar_ganancia_sin_ia(self):
-        pos = [{"coin": "+90170", "valor": 9.6, "precio": 0.96, "cantidad": 10.0, "pregunta": "¿SOL ≥ 120?", "lado_nombre": "Sí", "vence": AHORA + 3600_000}]
+        pos = [{"coin": "+90170", "valor": 9.6, "precio": 0.96, "cantidad": 10.0, "pregunta": "¿SOL ≥ 120?", "lado_nombre": "Sí", "vence": AHORA + 3600_000,
+                "costo": 0.7, "min_venta": PR.precio_minimo_venta(0.7)}]
         op = opinar_fijo({})
         nuevas, _, _ = PR.proponer({**CFG, "pred_tomar_ganancia": 95, "pred_vender_ia": False}, lista(), pos, [], 50, op)
         self.assertEqual([(o["coin"], o["accion"], o["regla"]) for o in nuevas], [("#90170", "VENDER", True)])
@@ -309,3 +311,92 @@ class MercadoGlobal(unittest.TestCase):
             ia.opinar_predicciones([{"coin": "#1"}], [], {"resumen": "Aversión al riesgo."})
         self.assertIn("Aversión al riesgo.", pedidos[0])
         self.assertIn("1 h, 24 h", pedidos[0])
+
+
+class SinPerdidas(unittest.TestCase):
+    """Nunca vender una predicción con pérdida, por mínima que sea."""
+
+    def pos(self, precio, costo):
+        return [{"coin": "+90171", "valor": precio * 10, "precio": precio, "cantidad": 10.0, "pregunta": "¿S&P 500 ≥ 7 800?", "lado_nombre": "No",
+                 "vence": AHORA + 3600_000, "costo": costo, "min_venta": PR.precio_minimo_venta(costo)}]
+
+    VENDE = {"#90171": {"accion": "VENDER", "confianza": 90, "prob": 20, "razon": "cambió el panorama"}}
+
+    def test_precio_minimo(self):
+        self.assertEqual(PR.precio_minimo_venta(0.7253), 0.7275)  # +0.3 % de comisión, redondeado hacia arriba
+        self.assertEqual(PR.precio_minimo_venta(0.2), 0.201)  # al menos +0.001
+        self.assertIsNone(PR.precio_minimo_venta(None))
+
+    def test_ia_no_vende_por_debajo_de_lo_que_pagaste(self):
+        # Los dos casos reales: compró a 0.7253 y vendió a 0.69; compró a 0.78 y vendió a 0.7192.
+        for precio, costo in ((0.69, 0.7253), (0.7192, 0.78), (0.7253, 0.7253)):
+            nuevas, notas, _ = PR.proponer({**CFG, "pred_categorias": []}, lista(), self.pos(precio, costo), [], 50, opinar_fijo(self.VENDE))
+            self.assertEqual(nuevas, [], (precio, costo))
+            self.assertTrue(any("no vendo con pérdida" in n for n in notas))
+
+    def test_con_ganancia_si_vende_y_nunca_bajo_el_minimo(self):
+        nuevas, _, _ = PR.proponer({**CFG, "pred_categorias": []}, lista(), self.pos(0.80, 0.7253), [], 50, opinar_fijo(self.VENDE))
+        self.assertEqual(len(nuevas), 1)
+        self.assertGreaterEqual(nuevas[0]["limite"], PR.precio_minimo_venta(0.7253))
+
+    def test_sin_costo_conocido_no_vende(self):
+        pos = self.pos(0.9, None)
+        nuevas, notas, _ = PR.proponer({**CFG, "pred_categorias": []}, lista(), pos, [], 50, opinar_fijo(self.VENDE))
+        self.assertEqual(nuevas, [])
+        self.assertTrue(any("no sé a cuánto" in n for n in notas))
+
+    def test_asegurar_ganancia_respeta_el_costo(self):
+        cfg = {**CFG, "pred_tomar_ganancia": 60, "pred_vender_ia": False, "pred_categorias": []}
+        nuevas, _, _ = PR.proponer(cfg, lista(), self.pos(0.65, 0.78), [], 50, opinar_fijo({}))
+        self.assertEqual(nuevas, [])
+
+    def test_la_ia_recibe_lo_que_pagaste(self):
+        op = opinar_fijo({})
+        PR.proponer({**CFG, "pred_categorias": []}, lista(), self.pos(0.69, 0.7253), [], 50, op)
+        r = op.llamadas[0][1][0]
+        self.assertEqual((r["pagaste"], r["vender_solo_desde"], r["puede_vender_sin_perdida"]), (0.7253, 0.7275, False))
+
+    def test_en_el_ciclo_el_mejor_comprador_por_debajo_no_vende(self):
+        from unittest import mock
+        pos = self.pos(0.80, 0.7253)
+        with mock.patch.object(K.ia, "opinar_predicciones", lambda c, p, *_: (self.VENDE, "m", None)), \
+                mock.patch.object(K, "http", lambda *a, **k: {"mercados": lista()}), mock.patch.object(K, "url_nube", lambda: "https://nube"):
+            notas = []
+            nuevas, _ = K.predicciones_ia(Base(bid=0.72), None, {**CFG, "pred_categorias": []}, pos, [], 50, notas)
+            self.assertEqual(nuevas, [])
+            self.assertTrue(any("no vendo con pérdida" in n for n in notas), notas)
+            nuevas, _ = K.predicciones_ia(Base(bid=0.79), None, {**CFG, "pred_categorias": []}, pos, [], 50, [])
+            self.assertEqual((nuevas[0]["accion"], nuevas[0]["limite"]), ("VENDER", 0.79))
+
+    def test_ultimo_candado_al_ejecutar(self):
+        import ordenes as O
+
+        class Ex:
+            entradas = {"+90171": 0.78}
+
+            def __init__(self):
+                self.ordenes = []
+
+            def orden_prediccion(self, cod, comprar, unidades, limite):
+                self.ordenes.append((cod, comprar, unidades, limite))
+                return {"cantidad": unidades, "precio": limite, "total": unidades * limite}
+        o = {"id": "x", "tipo": "prediccion", "coin": "#90171", "accion": "VENDER", "unidades": 13, "limite": 0.7192, "origen": "ia"}
+        ex = Ex()
+        upd, op = O.ejecutar_prediccion(ex, o, False)
+        self.assertEqual((upd["estado"], op, ex.ordenes), ("error", None, []))
+        self.assertIn("con pérdida", upd["error"])
+        # Tú puedes vender con pérdida si lo marcas a propósito.
+        upd, op = O.ejecutar_prediccion(ex, {**o, "origen": "usuario", "permitir_perdida": True}, False)
+        self.assertEqual(upd["estado"], "ejecutada")
+        # Con ganancia, sí.
+        upd, _ = O.ejecutar_prediccion(ex, {**o, "limite": 0.80}, False)
+        self.assertEqual(upd["estado"], "ejecutada")
+        # Sin costo conocido: la IA no vende; tú sí.
+        ex.entradas = {}
+        self.assertEqual(O.ejecutar_prediccion(ex, o, False)[0]["estado"], "error")
+        self.assertEqual(O.ejecutar_prediccion(ex, {**o, "origen": "usuario"}, False)[0]["estado"], "ejecutada")
+
+    def test_describir_trae_el_costo(self):
+        info = lambda c: {"outcomes": [], "questions": []} if c["type"] == "outcomeMeta" else {"#90171": "0.69"}
+        p = PR.describir({"+90171": 10}, info, {"+90171": 0.7253})[0]
+        self.assertEqual((p["costo"], p["min_venta"], p["pnl_pct"]), (0.7253, 0.7275, -4.87))

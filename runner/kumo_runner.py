@@ -201,7 +201,7 @@ def ciclo(remoto):
         if not (clave and getattr(base, "predicciones", None)):
             return []
         try:
-            return PR.describir(base.predicciones, base._info_hl)
+            return PR.describir(base.predicciones, base._info_hl, getattr(base, "entradas", None))
         except Exception as e:  # nunca deben tumbar el ciclo
             notas.append(f"Predicciones: {type(e).__name__}")
             return []
@@ -318,8 +318,9 @@ def predicciones_ia(base, ex, cfg, preds, pendientes, libre, notas):
             if not mejor or not mejor.get("precio"):
                 notas.append(f"Predicciones: quería vender «{o['etiqueta']}» pero no hay compradores ahora")
                 continue
-            if mejor["precio"] < o["limite"] - 0.08:
-                notas.append(f"Predicciones: sugiero vender «{o['etiqueta']}» pero el mejor comprador solo paga {mejor['precio']:g}")
+            if not o.get("min_venta") or mejor["precio"] < o["min_venta"]:
+                desde = f" (sin pérdida vendería desde {o['min_venta']:g})" if o.get("min_venta") else ""
+                notas.append(f"Predicciones: quería vender «{o['etiqueta']}» pero el mejor comprador solo paga {mejor['precio']:g}{desde}: no vendo con pérdida")
                 continue
             o["limite"] = mejor["precio"]
         o.update({"limite": float(f"{o['limite']:.5g}"), "id": f"iap{int(time.time())}{i}", "estado": "propuesta",

@@ -8,6 +8,7 @@ tu aprobación) o, en modo auto, ejecutadas en el mismo ciclo.
 import time
 
 from exchanges import ErrorExchange
+from predicciones import precio_minimo_venta
 
 MAX_IA_CICLO = 2  # órdenes nuevas de la IA por ciclo
 
@@ -61,6 +62,16 @@ def ejecutar_prediccion(ex, o, simulado, cfg=None):
     except (KeyError, TypeError, ValueError):
         return {**upd, "estado": "error", "error": "Orden de predicción incompleta"}, None
     compra = o["accion"] == "COMPRAR"
+    if not compra and not o.get("permitir_perdida"):
+        # Nunca vender con pérdida, por mínima que sea (con la comisión incluida). Una
+        # orden IOC se llena a tu límite o mejor: basta con que el límite no pierda.
+        costo = (getattr(ex, "entradas", None) or {}).get(f"+{cod}")
+        minimo = precio_minimo_venta(costo)
+        if minimo is None and o.get("origen") == "ia":
+            return {**upd, "estado": "error", "error": "No vendí: no sé a cuánto compraste esta predicción y la IA no vende si puede haber pérdida."}, None
+        if minimo is not None and lim < minimo:
+            return {**upd, "estado": "error", "error": f"No vendí: la compraste a {costo:.4g} y vender a {lim:g} sería con pérdida (sin pérdida desde {minimo:g}, comisión incluida). "
+                                                       "Si quieres vender igual, crea la venta marcando «vender aunque sea con pérdida».", "min_venta": minimo}, None
     op_pago, nota_pago = None, None
     if compra and (o.get("pagar_con") or (cfg or {}).get("pred_pagar_con")):
         # Antes de vender tu moneda, comprueba que la predicción se puede llenar a tu límite.

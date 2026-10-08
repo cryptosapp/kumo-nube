@@ -19,6 +19,18 @@ PATRON = re.compile(r"^\+(\d+)$")
 TRADUCE = {"Yes": "Sí", "No": "No", "template:Yes": "Sí", "template:No": "No"}
 
 
+# Vender nunca con pérdida: el precio mínimo cubre lo que pagaste más la comisión de
+# Hyperliquid al vender (~0.15 %) y un poco de redondeo.
+COMISION_VENTA = 0.003
+
+
+def precio_minimo_venta(costo):
+    """Precio por unidad desde el que vender ya no pierde dinero (None si no se sabe el costo)."""
+    if not costo or costo <= 0:
+        return None
+    return min(0.999, math.ceil(round(max(costo * (1 + COMISION_VENTA), costo + 0.001) * 10000, 6)) / 10000)
+
+
 def es_prediccion(coin):
     return bool(PATRON.match(str(coin)))
 
@@ -93,9 +105,10 @@ def _pregunta(o, preguntas):
     return nombre or f"Mercado {o.get('outcome')}"
 
 
-def describir(preds, info):
-    """Lista de predicciones con nombre, lado, precio y valor.
-    `info(cuerpo)` hace POST a https://api.hyperliquid.xyz/info."""
+def describir(preds, info, entradas=None):
+    """Lista de predicciones con nombre, lado, precio, valor y lo que pagaste.
+    `info(cuerpo)` hace POST a https://api.hyperliquid.xyz/info; `entradas` = {"+N": precio
+    promedio de compra} (de Hyperliquid: entryNtl / unidades)."""
     if not preds:
         return []
     try:
@@ -116,6 +129,7 @@ def describir(preds, info):
         lados = [s.get("name") for s in o.get("sideSpecs") or []]
         c = _campos(o.get("description"))
         precio = _num(mids.get(f"#{cod}"))
+        costo = (entradas or {}).get(coin)
         out.append({
             "coin": coin, "mercado": oid, "lado": lado,
             "lado_nombre": TRADUCE.get(lados[lado], lados[lado]) if lado < len(lados) else ("Sí" if lado == 0 else "No"),
@@ -123,6 +137,8 @@ def describir(preds, info):
             "cantidad": cant, "precio": precio,
             "valor": round(cant * precio, 2) if precio is not None else None,
             "pago_si_acierta": round(cant, 2),
+            "costo": round(costo, 5) if costo else None, "min_venta": precio_minimo_venta(costo),
+            "pnl_pct": round((precio / costo - 1) * 100, 2) if costo and precio is not None else None,
             "vence": _vence_ms(c.get("expiry")) or _vence_ms(_campos((preguntas.get(oid) or {}).get("description")).get("resolutionDeadline")),
             "quote": o.get("quoteToken") or "USDC",
             # Para que la IA compare el precio actual con el objetivo (mercados de precio).
@@ -207,11 +223,12 @@ def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None, glob
             continue
         cod = int(str(p["coin"]).lstrip("+"))
         coin = f"#{cod}"
-        # Asegurar ganancia: regla fija, sin IA.
-        if ganancia and p["precio"] >= ganancia and (coin, "VENDER") not in pend and len([o for o in nuevas if o["accion"] == "VENDER"]) < 1:
+        minv = p.get("min_venta")
+        # Asegurar ganancia: regla fija, sin IA (y nunca por debajo de lo que pagaste).
+        if ganancia and p["precio"] >= ganancia and minv and p["precio"] >= minv and (coin, "VENDER") not in pend and len([o for o in nuevas if o["accion"] == "VENDER"]) < 1:
             nuevas.append({"tipo": "prediccion", "coin": coin, "accion": "VENDER", "unidades": int(p["cantidad"]), "limite": p["precio"],
                            "etiqueta": f"{p['pregunta']} · {p['lado_nombre']}", "razon": f"Asegurar ganancia: ya vale {p['precio'] * 100:.0f}% (tu regla: {ganancia * 100:.0f}%)",
-                           "confianza": 100, "origen": "ia", "regla": True})
+                           "confianza": 100, "origen": "ia", "regla": True, "min_venta": minv})
             continue
         if not vender_ia:
             continue
@@ -222,7 +239,9 @@ def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None, glob
                         "ventaja_pts": ld.get("ventaja"),
                         "horas_para_vencer": (m and m.get("horas")) or (round((p["vence"] - time.time() * 1000) / 3_600_000, 1) if p.get("vence") else None),
                         "precio_actual": m and m.get("precio_actual"), "objetivo": m and m.get("objetivo"),
-                        "cambio_1h_pct": m and m.get("cambio_1h_pct"), "cambio_24h_pct": m and m.get("cambio_24h_pct"), "volatilidad": m and m.get("regimen")})
+                        "cambio_1h_pct": m and m.get("cambio_1h_pct"), "cambio_24h_pct": m and m.get("cambio_24h_pct"), "volatilidad": m and m.get("regimen"),
+                        "pagaste": p.get("costo"), "vender_solo_desde": minv,
+                        "puede_vender_sin_perdida": bool(minv and p["precio"] >= minv)})
 
     resumen = {"ts": int(time.time() * 1000), "revisados": len(lista), "elegibles": len(elegibles), "candidatos": len(cands), "posiciones": len(revisar),
                "categorias": sorted(cats), "modelo": None, "opiniones": [], "modo": cfg.get("pred_ia", "proponer"),
@@ -296,7 +315,15 @@ def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None, glob
             o = opin.get(r["coin"]) or {}
             if o.get("accion") != "VENDER" or o.get("confianza", 0) < conf_min or (r["coin"], "VENDER") in pend:
                 continue
-            nuevas.append({"tipo": "prediccion", "coin": r["coin"], "accion": "VENDER", "unidades": int(r["unidades"]), "limite": r["precio"],
+            # Nunca con pérdida, por mínima que sea: si no se sabe lo que pagaste, tampoco.
+            if not r["vender_solo_desde"]:
+                notas.append(f"Predicciones: la IA quería vender «{r['pregunta']} · {r['lado']}», pero no sé a cuánto la compraste: no vendo para no arriesgar una pérdida")
+                continue
+            if r["precio"] < r["vender_solo_desde"]:
+                notas.append(f"Predicciones: la IA quería vender «{r['pregunta']} · {r['lado']}» a {r['precio']:g}, pero la compraste a {r['pagaste']:g}: no vendo con pérdida (mantengo)")
+                continue
+            nuevas.append({"tipo": "prediccion", "coin": r["coin"], "accion": "VENDER", "unidades": int(r["unidades"]), "limite": max(r["precio"], r["vender_solo_desde"]),
+                           "min_venta": r["vender_solo_desde"],
                            "etiqueta": f"{r['pregunta']} · {r['lado']}", "razon": o.get("razon", ""), "confianza": o["confianza"], "origen": "ia", "horas": r["horas_para_vencer"],
                            "ia": {"accion": "VENDER", "confianza": o["confianza"], "razon": o.get("razon", ""), "prob": o.get("prob")}})
             break

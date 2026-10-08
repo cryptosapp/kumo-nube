@@ -95,3 +95,18 @@ class OrdenPrediccion(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CostoDeCompra(unittest.TestCase):
+    def test_saldos_lee_lo_que_pagaste(self):
+        ex = CcxtExchange("hyperliquid", "USDC", "0x" + "0" * 39 + "1", "0x" + "11" * 32)
+        ex._cuenta_lista = True
+        # Formato real de spotClearinghouseState (entryNtl = USDC pagados en total).
+        ex.ex.fetch_balance = lambda *a, **k: {"total": {"USDC": 40.0, "+90171": 13.0, "HYPE": 1.0},
+                                              "info": {"balances": [{"coin": "USDC", "total": "40.0", "entryNtl": "0.0"},
+                                                                    {"coin": "+90171", "total": "13.0", "hold": "0.0", "entryNtl": "10.14"},
+                                                                    {"coin": "HYPE", "total": "1.0", "entryNtl": "88.0"}]}}
+        saldos = ex.saldos()
+        self.assertEqual((saldos, ex.predicciones), ({"USDC": 40.0, "HYPE": 1.0}, {"+90171": 13.0}))
+        self.assertAlmostEqual(ex.entradas["+90171"], 0.78)
+        self.assertNotIn("HYPE", ex.entradas)

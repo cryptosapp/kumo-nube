@@ -59,11 +59,20 @@ class Proponer(unittest.TestCase):
 
     def test_tope_y_saldo(self):
         pos = [{"coin": "+90151", "valor": 25, "precio": 0.5, "cantidad": 50, "pregunta": "¿BTC?", "lado_nombre": "Sí"}]
+        # Quedan 5 USDC de tope (30 − 25): compra solo lo que cabe (12 u. × 0.40 = 4.80).
+        nuevas, notas, _ = PR.proponer({**CFG, "pred_vender_ia": False}, lista(), pos, [], 50, opinar_fijo(OPS))
+        self.assertEqual(nuevas[0]["unidades"], 12)
+        # Con 3 USDC libres compra 7 u. × 0.40 = 2.80 (el mínimo en predicciones es ~1 USDC, no 10).
+        nuevas, notas, _ = PR.proponer(CFG, lista(), [], [], 3, opinar_fijo(OPS))
+        self.assertEqual(nuevas[0]["unidades"], 7)
+        # Tope lleno o menos de ~1 USDC libre: nada, y lo explica.
+        pos[0]["valor"] = 30
         nuevas, notas, _ = PR.proponer({**CFG, "pred_vender_ia": False}, lista(), pos, [], 50, opinar_fijo(OPS))
         self.assertEqual(nuevas, [])
-        self.assertIn("tope", notas[0])
-        nuevas, notas, _ = PR.proponer(CFG, lista(), [], [], 3, opinar_fijo(OPS))
+        self.assertIn("tope", notas[-1])
+        nuevas, notas, _ = PR.proponer(CFG, lista(), [], [], 0.6, opinar_fijo(OPS))
         self.assertEqual(nuevas, [])
+        self.assertIn("mínimo ~1 USDC", notas[-1])
         self.assertIn("libres", notas[0])
 
     def test_no_repite_mercado_con_posicion_o_pendiente(self):

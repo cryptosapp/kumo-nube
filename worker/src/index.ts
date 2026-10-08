@@ -34,12 +34,15 @@ const CONFIG_DEFECTO: Json = {
   pred_supervisor: true, pred_monto_techo: 11, pred_max_total_techo: 30, pred_supervisor_log: [],
 };
 const PRED_CATEGORIAS = ['cripto_hoy', 'cripto_mediano', 'bolsa'];
+// Mínimo por orden en predicciones: ~1 USDC (no los 10 de spot). Hyperliquid no lo
+// publica; se ve en el libro: cientos de órdenes de 1.00-1.05 USDC y muchas de menos de 10.
+const MIN_PRED = 1;
 
 // Límites duros: la app no puede guardar valores fuera de estos rangos.
 const RANGOS: Record<string, [number, number]> = {
   monto_min: [1, 1000], monto_max: [1, 5000], rsi_compra: [5, 60], rsi_venta: [40, 95], banda: [0, 20],
   ganancia_min: [0, 50], stop_perdida: [0, 50], ia_conf_min: [0, 100], max_ops_ciclo: [0, 10], saldo_simulado: [10, 1000000], orden_horas: [1, 168],
-  pred_monto: [10, 500], pred_max_total: [10, 5000], pred_ventaja: [3, 40], pred_conf_min: [0, 100], pred_max_ciclo: [1, 5],
+  pred_monto: [1, 500], pred_max_total: [1, 5000], pred_ventaja: [3, 40], pred_conf_min: [0, 100], pred_max_ciclo: [1, 5],
   pred_prob_min: [1, 50], pred_prob_max: [50, 99], pred_horas_min: [0, 48], pred_tomar_ganancia: [0, 99], pred_corto_horas: [1, 168],
 };
 
@@ -1041,7 +1044,7 @@ async function prediccionPedir(env: Env, c: Json): Promise<Response> {
       { role: 'user', content: `El usuario pide: "${instruccion}"
 Cada unidad paga 1 USDC si acierta y 0 si no; «precio» es el precio MEDIO (la compra real se paga al vendedor más barato, que puede ser bastante más caro; Kumo lo comprueba). «modelo_pct» es un modelo estadístico con la volatilidad de 1 h, 24 h y 48 h (no es certeza); «ventaja» = modelo − precio en puntos; «mov_1h_24h_48h_pct» = movimiento típico del subyacente.
 Mercado global: ${lista0.global?.resumen || 'sin datos'} Tenlo en cuenta (con turbulencia sé más exigente).
-USDC libres: ${libre ?? 'desconocido'}.${config.pred_pagar_con ? ` Si falta USDC, Kumo vende ${config.pred_pagar_con} para pagar (tiene ${(estado.ultimo?.activos || []).find((a: Json) => a.simbolo === config.pred_pagar_con)?.valor ?? '?'} USDC en ${config.pred_pagar_con}).` : ''} Por compra suele usar ${config.pred_monto} USDC (mínimo 10). Tope total en predicciones: ${config.pred_max_total} USDC.
+USDC libres: ${libre ?? 'desconocido'}.${config.pred_pagar_con ? ` Si falta USDC, Kumo vende ${config.pred_pagar_con} para pagar (tiene ${(estado.ultimo?.activos || []).find((a: Json) => a.simbolo === config.pred_pagar_con)?.valor ?? '?'} USDC en ${config.pred_pagar_con}).` : ''} Por compra suele usar ${config.pred_monto} USDC; el mínimo por orden en predicciones es ~${MIN_PRED} USDC (no 10: eso es en spot), así que con poco USDC libre igual se puede comprar por lo que haya. Tope total en predicciones: ${config.pred_max_total} USDC.
 Sus posiciones: ${JSON.stringify(pos)}
 Mercados abiertos (los más relevantes a su pedido): ${JSON.stringify(filas)}
 Propón como mucho 3 órdenes. COMPRAR lleva "monto_usdc"; VENDER (solo de sus posiciones) lleva "unidades". REGLA DEL USUARIO: nunca vender con pérdida; VENDER solo si el precio llega a «vender_solo_desde».
@@ -1082,8 +1085,14 @@ Formato: {"respuesta":"2-4 frases para el usuario","propuestas":[{"coin":"#90170
       if (pm != null && px >= pm - 0.02) { descartadas.push(`${etiqueta}: el vendedor más barato pide ${px} y el modelo le da ${ref.l.prob_modelo}%: a ese precio no hay ventaja`); continue; }
       if (ref.l.precio != null && px > ref.l.precio + 0.05) aviso = `Ojo: el precio medio es ${ref.l.precio} pero el vendedor más barato pide ${px} (libro con pocas ofertas).`;
     }
-    const monto = Math.min(Math.max(10, Number(x.monto_usdc) || config.pred_monto || 11), config.pred_max_total || 30);
-    const unidades = accion === 'COMPRAR' ? Math.max(1, Math.ceil(monto / px)) : Math.min(Math.floor(mia!.cantidad), Math.max(1, Math.floor(Number(x.unidades) || mia!.cantidad)));
+    let monto = Math.min(Math.max(MIN_PRED, Number(x.monto_usdc) || config.pred_monto || 11), config.pred_max_total || 30);
+    // Sin otra moneda para pagar, no se propone más de lo que tienes libre.
+    const tope_libre = accion === 'COMPRAR' && !config.pred_pagar_con && typeof libre === 'number' ? libre : null;
+    if (tope_libre != null && monto > tope_libre) monto = tope_libre;
+    const unidades = accion === 'COMPRAR' ? Math.max(1, (tope_libre != null && monto >= tope_libre ? Math.floor : Math.ceil)(monto / px)) : Math.min(Math.floor(mia!.cantidad), Math.max(1, Math.floor(Number(x.unidades) || mia!.cantidad)));
+    if (accion === 'COMPRAR' && (unidades * px < MIN_PRED - 1e-9 || (tope_libre != null && unidades * px > tope_libre + 1e-9))) {
+      descartadas.push(`${etiqueta}: con ${tope_libre != null ? tope_libre.toFixed(2) : '?'} USDC libres no alcanza para el mínimo de ~${MIN_PRED} USDC a ${px}`); continue;
+    }
     if (accion === 'COMPRAR' && expuesto + unidades * px > (config.pred_max_total || 30) + 0.5) {
       descartadas.push(`${etiqueta}: pasaría tu tope de ${config.pred_max_total} USDC en predicciones (ya usas ${expuesto.toFixed(2)})`); continue;
     }

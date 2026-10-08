@@ -23,6 +23,21 @@ TRADUCE = {"Yes": "Sí", "No": "No", "template:Yes": "Sí", "template:No": "No"}
 # Hyperliquid al vender (~0.15 %) y un poco de redondeo.
 COMISION_VENTA = 0.003
 
+# Mínimo por orden en predicciones: ~1 USDC (los 10 USDC son de spot). Hyperliquid no
+# lo publica; en el libro hay cientos de órdenes de 1.00-1.05 USDC y muchas de menos de 10.
+MIN_ORDEN = 1.0
+
+
+def unidades_para(monto, precio, maximo):
+    """Unidades a comprar por ~`monto` USDC sin pasar de `maximo` (lo libre / lo que queda
+    del tope). Con poco USDC compra lo que alcance. None si no llega al mínimo de ~1 USDC."""
+    u = math.ceil(min(monto, maximo) / precio - 1e-9)
+    if u * precio > maximo + 1e-9:
+        u = math.floor(maximo / precio + 1e-9)
+    if u < 1 or u * precio < MIN_ORDEN - 1e-9:
+        return None
+    return u
+
 # Quién crea cada mercado («venue» en outcomeMeta). Sin venue = Hyperliquid. Los
 # creadores externos ponen en garantía HYPE, crean y resuelven sus mercados, y con
 # deployerFeeScale > 0 la comisión sube: 1.0 = el doble (la mitad es para el creador).
@@ -309,18 +324,19 @@ def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None, glob
             continue
         if o.get("prob") is not None and o["prob"] / 100 < c["precio"] + 0.03:
             continue  # la propia IA no ve margen suficiente
-        if expuesto + monto > tope:
-            notas.append(f"Predicciones: la IA quería comprar «{c['pregunta']} · {c['lado']}» pero pasaría tu tope de {tope:g} USDC")
+        # Con menos USDC libre (o cerca del tope) compra por lo que alcance, desde ~1 USDC.
+        maximo = min(tope - expuesto, libre)
+        u = unidades_para(monto, c["precio"], maximo) if maximo > 0 else None
+        if u is None:
+            motivo = f"pasaría tu tope de {tope:g} USDC" if tope - expuesto < libre else f"solo tienes {libre:.2f} USDC libres (mínimo ~{MIN_ORDEN:g} USDC a {c['precio']:g})"
+            notas.append(f"Predicciones: la IA quería comprar «{c['pregunta']} · {c['lado']}» pero {motivo}")
             break
-        if libre < monto:
-            notas.append(f"Predicciones: la IA quería comprar «{c['pregunta']} · {c['lado']}» y solo tienes {libre:.2f} USDC libres")
-            break
-        nuevas.append({"tipo": "prediccion", "coin": c["coin"], "accion": "COMPRAR", "unidades": max(1, math.ceil(monto / c["precio"])),
+        nuevas.append({"tipo": "prediccion", "coin": c["coin"], "accion": "COMPRAR", "unidades": u,
                        "limite": c["precio"], "etiqueta": f"{c['pregunta']} · {c['lado']}", "razon": o.get("razon", ""),
                        "confianza": o["confianza"], "origen": "ia", "horas": c["horas_para_vencer"],
                        "ia": {"accion": "COMPRAR", "confianza": o["confianza"], "razon": o.get("razon", ""), "prob": o.get("prob")}})
-        expuesto += monto
-        libre -= monto
+        expuesto += u * c["precio"]
+        libre -= u * c["precio"]
         compras += 1
 
     # Comprar más de una posición tuya si la señal es fuerte (cuenta en las compras del ciclo).
@@ -337,14 +353,16 @@ def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None, glob
         precio = ask or r["precio"]
         if not pmin <= precio <= pmax or (o.get("prob") is not None and o["prob"] / 100 < precio + 0.03):
             continue
-        if expuesto + monto > tope or libre < monto:
-            notas.append(f"Predicciones: la IA quería comprar más de «{r['pregunta']} · {r['lado']}» pero {'pasaría tu tope' if expuesto + monto > tope else 'no hay USDC libres suficientes'}")
+        maximo = min(tope - expuesto, libre)
+        u = unidades_para(monto, precio, maximo) if maximo > 0 else None
+        if u is None:
+            notas.append(f"Predicciones: la IA quería comprar más de «{r['pregunta']} · {r['lado']}» pero {'pasaría tu tope' if tope - expuesto < libre else 'no hay USDC libres suficientes'}")
             break
-        nuevas.append({"tipo": "prediccion", "coin": r["coin"], "accion": "COMPRAR", "unidades": max(1, math.ceil(monto / precio)), "limite": precio,
+        nuevas.append({"tipo": "prediccion", "coin": r["coin"], "accion": "COMPRAR", "unidades": u, "limite": precio,
                        "etiqueta": f"{r['pregunta']} · {r['lado']}", "razon": "Comprar más: " + o.get("razon", ""), "confianza": o["confianza"], "origen": "ia", "horas": r["horas_para_vencer"],
                        "ia": {"accion": "COMPRAR MÁS", "confianza": o["confianza"], "razon": o.get("razon", ""), "prob": o.get("prob")}})
-        expuesto += monto
-        libre -= monto
+        expuesto += u * precio
+        libre -= u * precio
         compras += 1
 
     # Venta: si la IA ve tu lado sobrevalorado (máx. una por ciclo).

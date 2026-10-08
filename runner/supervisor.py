@@ -12,7 +12,7 @@ CADA_HORAS = 6
 
 AJUSTABLES = {
     "pred_ventaja": (3, 40), "pred_conf_min": (50, 100), "pred_prob_min": (1, 50), "pred_prob_max": (50, 99),
-    "pred_horas_min": (0, 48), "pred_max_ciclo": (1, 5), "pred_monto": (10, 500), "pred_max_total": (10, 5000),
+    "pred_horas_min": (0, 48), "pred_max_ciclo": (1, 5), "pred_monto": (1, 500), "pred_max_total": (1, 5000),
 }
 CATEGORIAS = ("cripto_hoy", "cripto_mediano", "bolsa")
 TECHOS = {"pred_monto": "pred_monto_techo", "pred_max_total": "pred_max_total_techo"}

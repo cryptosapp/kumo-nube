@@ -399,4 +399,48 @@ class SinPerdidas(unittest.TestCase):
     def test_describir_trae_el_costo(self):
         info = lambda c: {"outcomes": [], "questions": []} if c["type"] == "outcomeMeta" else {"#90171": "0.69"}
         p = PR.describir({"+90171": 10}, info, {"+90171": 0.7253})[0]
-        self.assertEqual((p["costo"], p["min_venta"], p["pnl_pct"]), (0.7253, 0.7275, -4.87))
+        self.assertEqual((p["costo"], p["min_venta"], p["pnl_pct"]), (0.7253, 0.7297, -4.87))  # mercado desconocido: se supone comisión ×2
+
+
+class CreadoresExternos(unittest.TestCase):
+    """Mercados de out / skew / trade.xyz: se muestran con su creador y, si cobran
+    comisión de creador (deployerFeeScale), el mínimo sin pérdida sube."""
+
+    META = {"outcomes": [
+        {"outcome": 7581, "name": "template:binaryPrice", "description": "perp:BTC|priceDescription:the Pyth BTC/USD price|seconds:90|threshold:85090|time:20261009-0800",
+         "sideSpecs": [{"name": "template:Yes"}, {"name": "template:No"}], "venue": "skew", "deployerFeeScale": "1.0"},
+        {"outcome": 7352, "name": "template:binaryPrice", "description": "perp:HYPE|priceDescription:1-minute candle|seconds:300|threshold:98|time:20261030-2000",
+         "sideSpecs": [{"name": "template:Yes"}, {"name": "template:No"}], "venue": "txyz"}], "questions": []}
+
+    def info(self, c):
+        return self.META if c["type"] == "outcomeMeta" else {"#75811": "0.9", "#73520": "0.5"}
+
+    def test_minimo_con_comision_doble(self):
+        self.assertEqual(PR.precio_minimo_venta(0.7253), 0.7275)
+        self.assertEqual(PR.precio_minimo_venta(0.7253, 1.0), 0.7297)
+
+    def test_describir_muestra_creador(self):
+        r = PR.describir({"+75811": 10.0, "+73520": 5.0}, self.info, {"+75811": 0.7253, "+73520": 0.4})
+        d = {p["coin"]: p for p in r}
+        self.assertEqual((d["+75811"]["creador"], d["+75811"]["comision_doble"], d["+75811"]["min_venta"]), ("skew", True, 0.7297))
+        self.assertEqual((d["+73520"]["creador"], d["+73520"]["comision_doble"]), ("trade.xyz", None))
+
+    def test_bloqueo_final_usa_comision_del_creador(self):
+        import ordenes as O
+        PR._META.update(datos=None, ts=0)
+
+        class Ex:
+            entradas = {"+75811": 0.7253}
+            _info_hl = staticmethod(self.info)
+            def orden_prediccion(s, *a):
+                raise AssertionError("no debía vender")
+        o = {"id": "x", "tipo": "prediccion", "coin": "#75811", "accion": "VENDER", "unidades": 10, "limite": 0.728, "origen": "ia"}
+        upd, op = O.ejecutar_prediccion(Ex(), o, False)
+        self.assertIsNone(op)
+        self.assertIn("sin pérdida desde 0.7297", upd["error"])
+
+    def test_sin_meta_supone_comision_alta(self):
+        PR._META.update(datos=None, ts=0)
+        def falla(c):
+            raise OSError("sin red")
+        self.assertEqual(PR.escala_comision(falla, 7581), 1.0)

@@ -8,9 +8,17 @@ tu aprobación) o, en modo auto, ejecutadas en el mismo ciclo.
 import time
 
 from exchanges import ErrorExchange
-from predicciones import precio_minimo_venta
+from predicciones import escala_comision, precio_minimo_venta
 
 MAX_IA_CICLO = 2  # órdenes nuevas de la IA por ciclo
+
+# Vender monedas spot sin pérdida: precio ≥ costo + este margen (comisión de venta ~0.1-0.4 %
+# y diferencia entre el último precio y lo que de verdad paga el comprador).
+MARGEN_SPOT = 0.005
+
+
+def minimo_spot(costo):
+    return costo * (1 + MARGEN_SPOT) if costo and costo > 0 else None
 
 
 def _cantidad_venta(o, saldos):
@@ -35,13 +43,20 @@ def _pagar_con(ex, o, cfg, costo):
     precio = (ex.precios([moneda]).get(moneda) or {}).get("precio")
     if not precio:
         return None, None, f"No hay precio de {moneda} para pagar con él"
+    # Tampoco aquí se vende con pérdida: si esa moneda vale menos de lo que pagaste, no se usa.
+    entrada = (getattr(ex, "entradas", None) or {}).get(moneda)
+    minimo = minimo_spot(entrada)
+    if minimo and precio < minimo:
+        return None, None, (f"No pagué con {moneda}: vale {precio:.4g} y la compraste a {entrada:.4g}; venderla sería con pérdida. "
+                            "Pon USDC o espera. No se movió nada.")
     vender_usdc = max((costo - usdc) * 1.02 + 0.05, MIN_SPOT_HL)
     cant = vender_usdc / precio
     if saldos.get(moneda, 0.0) < cant:
         return None, None, (f"Faltan {costo - usdc:.2f} USDC y no tienes suficiente {moneda} para cubrirlos "
                             f"(necesito vender {cant:.4g}, tienes {saldos.get(moneda, 0.0):.4g}). No se movió nada.")
     try:
-        r = ex.vender(moneda, cant)
+        # Límite: sin pérdida y como mucho 2 % por debajo del precio actual (no el 5 % de una orden a mercado).
+        r = ex.vender(moneda, cant, max(minimo or 0, precio * 0.98))
     except ErrorExchange as e:
         return None, None, f"No pude vender {moneda} para pagar: {str(e)[:150]}. No se movió nada."
     op = {"ts": int(time.time()), "simbolo": moneda, "accion": "VENDER", "cantidad": r["cantidad"], "precio": r["precio"], "total": round(r["total"], 2),
@@ -49,9 +64,38 @@ def _pagar_con(ex, o, cfg, costo):
     return op, f"Vendí {r['cantidad']:.4g} {moneda} ({r['total']:.2f} USDC) para pagarla", None
 
 
-def ejecutar_prediccion(ex, o, simulado, cfg=None):
+def _sigue_con_ventaja(ex, o, cod, cfg, mercados):
+    """Compra de la IA: justo antes de enviarla se vuelve a mirar el mercado. Si ya
+    venció, falta poco o el precio real ya no deja ventaja frente al modelo, no se
+    compra (una propuesta aprobada horas después puede tener un precio viejo).
+    Devuelve el motivo para no comprar, o None si sigue valiendo la pena."""
+    if mercados is None:
+        return "no pude leer los mercados ahora para comprobar que siga teniendo ventaja"
+    m = next((x for x in mercados if x.get("mercado") == cod // 10), None)
+    lados = (m or {}).get("lados") or []
+    ld = lados[cod % 10] if cod % 10 < len(lados) else None
+    if not m or not ld:
+        return "ese mercado ya no está abierto"
+    horas_min = float((cfg or {}).get("pred_horas_min") if (cfg or {}).get("pred_horas_min") is not None else 1)
+    if m.get("horas") is not None and m["horas"] < horas_min:
+        return f"vence en {m['horas']} h (tu mínimo es {horas_min:g} h)"
+    if ld.get("prob_modelo") is None:
+        return "el modelo ya no le calcula probabilidad"
+    ventaja = float((cfg or {}).get("pred_ventaja") or 8)
+    tope = ld["prob_modelo"] / 100 - ventaja / 200
+    mejor = ex.mejor_precio_prediccion(cod, True) if hasattr(ex, "mejor_precio_prediccion") else None
+    ask = (mejor or {}).get("precio")
+    if not ask:
+        return "no hay vendedores ahora"
+    if ask > tope:
+        return f"ya no tiene ventaja: el modelo da {ld['prob_modelo']:g}% y el más barato vende a {ask:g} (máx. {tope:.3f})"
+    return None
+
+
+def ejecutar_prediccion(ex, o, simulado, cfg=None, mercados=None):
     """Órdenes en mercados de predicción de Hyperliquid (solo en dinero real).
-    Si en la respuesta viene «_op_pago», es la venta de la moneda con la que se pagó."""
+    Si en la respuesta viene «_op_pago», es la venta de la moneda con la que se pagó.
+    `mercados` = lista de la nube (con el modelo), para revisar las compras de la IA."""
     upd = {"id": o["id"]}
     if simulado:
         return {**upd, "estado": "error", "error": "Las predicciones solo se operan en dinero real"}, None
@@ -62,11 +106,17 @@ def ejecutar_prediccion(ex, o, simulado, cfg=None):
     except (KeyError, TypeError, ValueError):
         return {**upd, "estado": "error", "error": "Orden de predicción incompleta"}, None
     compra = o["accion"] == "COMPRAR"
+    if compra and o.get("origen") == "ia":
+        motivo = _sigue_con_ventaja(ex, o, cod, cfg, mercados)
+        if motivo:
+            return {**upd, "estado": "error", "error": f"No compré: {motivo}. No se movió nada."}, None
     if not compra and not o.get("permitir_perdida"):
         # Nunca vender con pérdida, por mínima que sea (con la comisión incluida). Una
         # orden IOC se llena a tu límite o mejor: basta con que el límite no pierda.
         costo = (getattr(ex, "entradas", None) or {}).get(f"+{cod}")
-        minimo = precio_minimo_venta(costo)
+        # Mercados de creadores externos (out, skew…) cobran más comisión al vender.
+        escala = escala_comision(ex._info_hl, cod // 10) if costo and hasattr(ex, "_info_hl") else 0.0
+        minimo = precio_minimo_venta(costo, escala)
         if minimo is None and o.get("origen") == "ia":
             return {**upd, "estado": "error", "error": "No vendí: no sé a cuánto compraste esta predicción y la IA no vende si puede haber pérdida."}, None
         if minimo is not None and lim < minimo:
@@ -103,11 +153,21 @@ def ejecutar_prediccion(ex, o, simulado, cfg=None):
     return {**upd, "estado": "ejecutada", "nota": nota, "resultado": {"precio": r["precio"], "cantidad": r["cantidad"], "total": round(r["total"], 2), "ts": int(time.time() * 1000)}}, op
 
 
-def ejecutar(ex, o, saldos, precios, costos, cfg, simulado):
+def lista_para_intentar(o, precios):
+    """¿Se puede intentar ya? Una orden spot con límite espera a que el precio lo cumpla."""
+    if o.get("tipo") == "prediccion" or not o.get("limite"):
+        return True
+    p = precios.get(o.get("simbolo"))
+    if not p:
+        return True  # que ejecutar() explique que no hay precio
+    return p <= o["limite"] if o.get("accion") == "COMPRAR" else p >= o["limite"]
+
+
+def ejecutar(ex, o, saldos, precios, costos, cfg, simulado, mercados=None):
     """Intenta ejecutar una orden aprobada. Devuelve (actualizacion, operacion|None).
     Si aún no se cumple su condición, la orden sigue «aprobada» con una nota."""
     if o.get("tipo") == "prediccion":
-        return ejecutar_prediccion(ex, o, simulado, cfg)
+        return ejecutar_prediccion(ex, o, simulado, cfg, mercados)
     sym, acc = o["simbolo"], o["accion"]
     upd = {"id": o["id"]}
     precio = precios.get(sym)
@@ -131,10 +191,15 @@ def ejecutar(ex, o, saldos, precios, costos, cfg, simulado):
             cant = _cantidad_venta(o, saldos)
             if cant * precio < minimo:
                 return {**upd, "estado": "error", "error": f"No tienes suficiente {sym} para vender (mínimo {minimo:g} {quote})"}, None
-            costo = (costos.get(sym) or {}).get("costo")
-            if costo and precio < costo and cfg.get("nunca_vender_con_perdida", True) and not o.get("permitir_perdida"):
-                return {**upd, "estado": "aprobada", "nota": f"Sería con pérdida ({(precio / costo - 1) * 100:.1f}%): espero o marca «vender aunque pierda»"}, None
-            r = ex.vender(sym, cant)
+            c = costos.get(sym) or {}
+            costo, minimo = c.get("costo"), None
+            if cfg.get("nunca_vender_con_perdida", True) and not o.get("permitir_perdida"):
+                if o.get("origen") == "ia" and (not costo or c.get("estimado")):
+                    return {**upd, "estado": "error", "error": f"No vendí: no sé a cuánto compraste {sym} (costo {'estimado' if costo else 'desconocido'}) y la IA no vende si puede haber pérdida."}, None
+                minimo = minimo_spot(costo)
+                if minimo and precio < minimo:
+                    return {**upd, "estado": "aprobada", "nota": f"Sería con pérdida o sin cubrir comisión ({(precio / costo - 1) * 100:+.1f}%; sin pérdida desde {minimo:.6g}): espero o marca «vender aunque pierda»"}, None
+            r = ex.vender(sym, cant, minimo)
     except ErrorExchange as e:
         return {**upd, "estado": "error", "error": str(e)[:200]}, None
     costo = (costos.get(sym) or {}).get("costo")
@@ -145,11 +210,17 @@ def ejecutar(ex, o, saldos, precios, costos, cfg, simulado):
     return {**upd, "estado": "ejecutada", "resultado": {"precio": r["precio"], "cantidad": r["cantidad"], "total": round(r["total"], 2), "ts": int(time.time() * 1000)}}, op
 
 
-def de_la_ia(cfg, opiniones, saldos, precios, pendientes):
+def de_la_ia(cfg, opiniones, saldos, precios, pendientes, notas=None):
     """Señales COMPRAR/VENDER con confianza suficiente → órdenes nuevas (sin repetir
-    las que ya están pendientes)."""
+    las que ya están pendientes). En modo auto la IA solo compra monedas de tu reparto
+    y sin pasar su objetivo: si no, cada ciclo podría volver a comprar lo mismo."""
     if cfg.get("ia") == "off" or cfg.get("ordenes_ia", "proponer") == "off":
         return []
+    notas = notas if notas is not None else []
+    auto = cfg.get("ordenes_ia") == "auto"
+    from estrategia import valorar
+    total, activos = valorar(saldos, precios, cfg["quote"].upper())
+    pesos = {a["simbolo"]: a["peso"] for a in activos}
     umbral = float(cfg.get("ia_conf_min") or 65)
     quote = cfg["quote"].upper()
     mn, mx = float(cfg.get("monto_min") or 5), float(cfg.get("monto_max") or 25)
@@ -166,6 +237,12 @@ def de_la_ia(cfg, opiniones, saldos, precios, pendientes):
                 continue
             f = (conf - umbral) / max(1.0, 100 - umbral)
             orden["monto"] = round(mn + (mx - mn) * f, 2)
+            if auto:
+                obj = float((cfg.get("objetivo") or {}).get(sym, 0))
+                tras = pesos.get(sym, 0.0) + (100 * orden["monto"] / total if total else 100)
+                if obj <= 0 or tras > obj + float(cfg.get("banda") or 0):
+                    notas.append(f"IA: quería comprar {sym}, pero {'no está en tu reparto' if obj <= 0 else f'pasaría su objetivo ({tras:.1f}% de {obj:g}%)'}: no compro sola")
+                    continue
         else:
             if saldos.get(sym, 0.0) * precios[sym] < mn:
                 continue

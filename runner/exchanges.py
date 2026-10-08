@@ -74,7 +74,7 @@ class CcxtExchange:
         self._cuenta_lista = exchange_id not in BILLETERA
         self.aviso_cuenta = None  # explicación para el usuario si se corrigió la dirección
         self.predicciones = {}  # {"+N": cantidad} de mercados de predicción (Hyperliquid)
-        self.entradas = {}  # {"+N": precio promedio de compra}
+        self.entradas = {}  # {"+N" o "HYPE": precio promedio de compra según Hyperliquid}
 
     def _info_hl(self, cuerpo):
         req = urllib.request.Request("https://api.hyperliquid.xyz/info", data=json.dumps(cuerpo).encode(),
@@ -143,10 +143,11 @@ class CcxtExchange:
         # Hyperliquid: los mercados de predicción («+N») no son monedas; van aparte.
         saldos, self.predicciones = separar(saldos)
         # Hyperliquid da lo que pagaste por cada token («entryNtl»): precio promedio de compra.
+        # Vale para predicciones y monedas spot (así Kumo sabe tu costo real, no uno estimado).
         self.entradas = {}
         for x in ((b.get("info") or {}).get("balances") or []) if isinstance(b.get("info"), dict) else []:
             coin, tot, ntl = str(x.get("coin") or "").upper(), _f(x.get("total")), _f(x.get("entryNtl"))
-            if coin in self.predicciones and tot > 0 and ntl > 0:
+            if (coin in self.predicciones or coin in saldos) and coin not in ESTABLES and tot > 0 and ntl > 0:
                 self.entradas[coin] = ntl / tot
         return saldos
 
@@ -280,17 +281,39 @@ class CcxtExchange:
             raise ErrorExchange(_explicar(self.id, e))
         return _resultado(o, precio)
 
-    def vender(self, simbolo, cantidad):
+    def vender(self, simbolo, cantidad, precio_min=None):
+        """Vende a mercado. Con `precio_min` nunca vende por debajo: se mira el mejor
+        comprador (bid) y en Hyperliquid la orden es IOC con ese límite, así el
+        deslizamiento (hasta 5 % en una orden «a mercado») no puede dejarte en pérdida."""
         par = self._par(simbolo)
         try:
-            precio = _f(self.ex.fetch_ticker(par).get("last"))
-            if self.id in BILLETERA:
+            t = self.ex.fetch_ticker(par)
+            precio = _f(t.get("last"))
+            bid = _f(t.get("bid"))
+            if precio_min and bid and bid < precio_min:
+                raise ErrorExchange(f"No vendí {simbolo}: el mejor comprador paga {bid:.6g} y sin pérdida es desde {precio_min:.6g}")
+            if self.id in BILLETERA and precio_min:
+                o = self.ex.create_order(par, "limit", "sell", self._ajustar(par, cantidad), _arriba_5cifras(precio_min), {"timeInForce": "Ioc"})
+            elif self.id in BILLETERA:
                 o = self.ex.create_order(par, "market", "sell", self._ajustar(par, cantidad), precio)
             else:
                 o = self.ex.create_market_sell_order(par, self._ajustar(par, cantidad))
         except ccxt.BaseError as e:
             raise ErrorExchange(_explicar(self.id, e))
-        return _resultado(o, precio)
+        r = _resultado(o, precio)
+        if precio_min and self.id in BILLETERA and not _f(o.get("filled")):
+            raise ErrorExchange(f"No vendí {simbolo}: nadie compraba a {precio_min:.6g} o más (no vendo con pérdida)")
+        return r
+
+
+def _arriba_5cifras(x):
+    """Redondea HACIA ARRIBA a 5 cifras significativas (Hyperliquid no acepta más):
+    un límite de venta redondeado hacia abajo podría quedar por debajo del mínimo."""
+    import math
+    if x <= 0:
+        return x
+    paso = 10 ** (math.floor(math.log10(x)) - 4)
+    return round(math.ceil(round(x / paso, 6)) * paso, 12)
 
 
 ESTABLES = {"USDT", "USDC", "USD", "DAI", "FDUSD", "TUSD", "BUSD", "USDP", "EUR", "PYUSD", "USDE", "USD1"}
@@ -402,7 +425,11 @@ class CryptoComApp:
         precio = gastado / recibido if recibido else 0
         return {"cantidad": recibido, "precio": precio, "total": gastado, "id": oid}
 
-    def vender(self, simbolo, cantidad):
+    def vender(self, simbolo, cantidad, precio_min=None):
+        if precio_min:
+            p = (self.precios([simbolo]).get(simbolo.upper()) or {}).get("precio")
+            if p and p < precio_min:
+                raise ErrorExchange(f"No vendí {simbolo}: vale {p:.6g} y sin pérdida es desde {precio_min:.6g}")
         cant = Decimal(str(cantidad)).quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
         vendido, recibido, oid = self._intercambio(simbolo.upper(), self.quote, cant)
         precio = recibido / vendido if vendido else 0
@@ -449,10 +476,12 @@ class Simulador:
         self.cartera[simbolo.upper()] = self.cartera.get(simbolo.upper(), 0) + cantidad
         return {"cantidad": cantidad, "precio": precio, "total": monto_quote, "id": f"sim-{int(time.time())}"}
 
-    def vender(self, simbolo, cantidad):
+    def vender(self, simbolo, cantidad, precio_min=None):
         precio = self.precios([simbolo]).get(simbolo.upper(), {}).get("precio", 0)
         if precio <= 0:
             raise ErrorExchange(f"Sin precio para {simbolo}")
+        if precio_min and precio < precio_min:
+            raise ErrorExchange(f"No vendí {simbolo}: vale {precio:.6g} y sin pérdida es desde {precio_min:.6g}")
         cantidad = min(cantidad, self.cartera.get(simbolo.upper(), 0))
         total = cantidad * precio * 0.999
         self.cartera[simbolo.upper()] = self.cartera.get(simbolo.upper(), 0) - cantidad

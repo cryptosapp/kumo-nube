@@ -69,6 +69,8 @@ def revisar(cfg, ordenes, posiciones, resumen, chat_json):
             "Si todo está razonable, no cambies nada (cambios vacío). Cambia poco cada vez.\n"
             f"Parámetros actuales: {actual}\n"
             f"Techos del usuario (no puedes superarlos): {techos}\n"
+            "Solo puedes hacer el bot MÁS prudente que lo que puso el usuario: más ventaja, más confianza, menos compras por ciclo, "
+            "menos categorías, rango de probabilidad más estrecho. Lo más arriesgado lo rechaza la nube.\n"
             f"Rangos permitidos: {AJUSTABLES}; categorías posibles: {list(CATEGORIAS)}\n"
             "Significado: pred_ventaja = puntos mínimos entre modelo y mercado; pred_conf_min = confianza mínima de la IA; "
             "pred_prob_min/max = % del lado permitido; pred_horas_min = no entrar si falta menos; pred_max_ciclo = compras por ciclo; "

@@ -18,7 +18,7 @@ class HL:
     def precios(self, sims):
         return {"HYPE": {"precio": 40.0}}
 
-    def vender(self, sym, cant):
+    def vender(self, sym, cant, precio_min=None):
         if self.falla_venta:
             raise ErrorExchange("Hyperliquid: rechazada")
         self.log.append(("vender", sym, round(cant, 6)))

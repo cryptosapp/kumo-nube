@@ -109,4 +109,4 @@ class CostoDeCompra(unittest.TestCase):
         saldos = ex.saldos()
         self.assertEqual((saldos, ex.predicciones), ({"USDC": 40.0, "HYPE": 1.0}, {"+90171": 13.0}))
         self.assertAlmostEqual(ex.entradas["+90171"], 0.78)
-        self.assertNotIn("HYPE", ex.entradas)
+        self.assertEqual(ex.entradas["HYPE"], 88.0)  # también el costo real de tus monedas spot

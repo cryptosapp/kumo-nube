@@ -120,6 +120,8 @@ function validarConfig(actual: Json, cambios: Json): { config?: Json; error?: st
   // Lo que pone el usuario es el techo: el supervisor IA solo puede bajarlo.
   if (cambios.pred_monto !== undefined) c.pred_monto_techo = c.pred_monto;
   if (cambios.pred_max_total !== undefined) c.pred_max_total_techo = c.pred_max_total;
+  // Y lo que pone en los demás parámetros es su límite de riesgo: el supervisor solo puede ser más estricto.
+  for (const k of SUPERVISABLES) if (cambios[k] !== undefined) c.pred_usuario = { ...(c.pred_usuario || {}), [k]: c[k] };
   if (cambios.nunca_vender_con_perdida !== undefined) c.nunca_vender_con_perdida = Boolean(cambios.nunca_vender_con_perdida);
   if (cambios.objetivo !== undefined) {
     const obj: Json = {};
@@ -152,6 +154,20 @@ async function aplicarSupervisor(env: Env, ahora: number, s: Json): Promise<void
   if (cambios.pred_monto !== undefined) cambios.pred_monto = Math.min(Number(cambios.pred_monto), Number(actual.pred_monto_techo ?? actual.pred_monto));
   if (cambios.pred_max_total !== undefined) cambios.pred_max_total = Math.min(Number(cambios.pred_max_total), Number(actual.pred_max_total_techo ?? actual.pred_max_total));
   if (cambios.pred_conf_min !== undefined) cambios.pred_conf_min = Math.max(50, Number(cambios.pred_conf_min));
+  // Nunca más arriesgado que lo que puso el usuario: más ventaja, más confianza, menos compras, menos categorías.
+  const usr: Json = { ...Object.fromEntries(SUPERVISABLES.map((k) => [k, actual[k]])), ...(actual.pred_usuario || {}) };
+  const n = (k: string) => Number(cambios[k]);
+  if (cambios.pred_ventaja !== undefined) cambios.pred_ventaja = Math.max(n('pred_ventaja'), Number(usr.pred_ventaja));
+  if (cambios.pred_conf_min !== undefined) cambios.pred_conf_min = Math.max(n('pred_conf_min'), Number(usr.pred_conf_min ?? 0));
+  if (cambios.pred_prob_min !== undefined) cambios.pred_prob_min = Math.max(n('pred_prob_min'), Number(usr.pred_prob_min));
+  if (cambios.pred_prob_max !== undefined) cambios.pred_prob_max = Math.min(n('pred_prob_max'), Number(usr.pred_prob_max));
+  if (cambios.pred_horas_min !== undefined) cambios.pred_horas_min = Math.max(n('pred_horas_min'), Number(usr.pred_horas_min));
+  if (cambios.pred_max_ciclo !== undefined) cambios.pred_max_ciclo = Math.min(n('pred_max_ciclo'), Number(usr.pred_max_ciclo));
+  if (cambios.pred_categorias !== undefined) {
+    const permitidas = Array.isArray(usr.pred_categorias) ? usr.pred_categorias : [];
+    const l = Array.isArray(cambios.pred_categorias) ? cambios.pred_categorias.filter((x: string) => permitidas.includes(x)) : [];
+    if (l.length) cambios.pred_categorias = l; else delete cambios.pred_categorias;
+  }
   const v = validarConfig(actual, cambios);
   if (!v.config) {
     await bitacora(env, [{ ts: ahora, tipo: 'supervisor', ok: false, texto: `Supervisor IA: cambio rechazado (${v.error})` }]);
@@ -160,6 +176,7 @@ async function aplicarSupervisor(env: Env, ahora: number, s: Json): Promise<void
   // validarConfig trata lo que llega como si fuera del usuario: los techos no se mueven.
   v.config.pred_monto_techo = actual.pred_monto_techo ?? actual.pred_monto;
   v.config.pred_max_total_techo = actual.pred_max_total_techo ?? actual.pred_max_total;
+  v.config.pred_usuario = usr;
   const hechos = Object.keys(cambios).filter((k) => JSON.stringify(actual[k]) !== JSON.stringify(v.config![k]))
     .map((k) => ({ k, antes: actual[k], despues: v.config![k] }));
   if (!hechos.length) return;
@@ -198,13 +215,17 @@ async function guardarSenales(env: Env, ciclo: number, ts: number, r: Json): Pro
 // propuesta/aprobada → cancelada | caducada (orden_horas sin ejecutarse).
 const MAX_ORDENES = 80;
 const PENDIENTE = (o: Json) => o.estado === 'propuesta' || o.estado === 'aprobada';
+// Si el resultado de una orden «ejecutando» no llega en este tiempo, no se reintenta:
+// se marca error para que revises tu historial en el exchange.
+const EJECUTANDO_MAX_MS = 2 * 3600_000;
 
 async function leerOrdenes(env: Env): Promise<Json[]> {
   return leer<Json[]>(env, 'ordenes', []);
 }
 async function guardarOrdenes(env: Env, lista: Json[]): Promise<void> {
   // Las pendientes nunca se recortan; de las cerradas quedan las más nuevas.
-  const pend = lista.filter(PENDIENTE), cerradas = lista.filter((o) => !PENDIENTE(o));
+  const viva = (o: Json) => PENDIENTE(o) || o.estado === 'ejecutando';
+  const pend = lista.filter(viva), cerradas = lista.filter((o) => !viva(o));
   await env.KUMO.put('ordenes', JSON.stringify([...pend, ...cerradas].sort((a, b) => b.ts - a.ts).slice(0, Math.max(MAX_ORDENES, pend.length))));
 }
 function nuevoId(prefijo: string): string {
@@ -286,7 +307,8 @@ async function mezclarOrdenes(env: Env, ahora: number, r: Json): Promise<void> {
     if (!o) continue;
     // Si el usuario la canceló mientras corría el ciclo, solo cuenta si de verdad se ejecutó.
     if (o.estado === 'cancelada' && u.estado !== 'ejecutada') continue;
-    if (o.estado !== u.estado) eventos.push({ tipo: 'orden', ok: u.estado !== 'error', texto: `${textoOrden(o)}: ${u.estado}${u.error ? ` · ${u.error}` : ''}`, id: o.id });
+    // De «ejecutando» de vuelta a «aprobada» = sigue esperando su precio: no es noticia.
+    if (o.estado !== u.estado && !(o.estado === 'ejecutando' && u.estado === 'aprobada')) eventos.push({ tipo: 'orden', ok: u.estado !== 'error', texto: `${textoOrden(o)}: ${u.estado}${u.error ? ` · ${u.error}` : ''}`, id: o.id });
     if (o.estado !== u.estado || o.nota !== u.nota) cambio = true;
     Object.assign(o, { estado: u.estado, nota: u.nota || null, error: u.error || null, resultado: u.resultado || o.resultado || null, ts_mod: ahora });
   }
@@ -305,6 +327,12 @@ async function mezclarOrdenes(env: Env, ahora: number, r: Json): Promise<void> {
     eventos.push({ tipo: 'orden', ok: o.estado !== 'error', texto: `IA ${o.estado === 'ejecutada' ? 'ejecutó' : 'propuso'}: ${textoOrden(o)}`, id: o.id });
   }
   for (const o of lista) {
+    if (o.estado === 'ejecutando' && (o.ts_mod || o.ts) < ahora - EJECUTANDO_MAX_MS) {
+      Object.assign(o, { estado: 'error', ts_mod: ahora, error: 'El ciclo que la enviaba no informó el resultado. No la reintento para no repetirla: revisa en tu exchange si se ejecutó.' });
+      cambio = true;
+      eventos.push({ tipo: 'orden', ok: false, texto: `Sin resultado: ${textoOrden(o)}`, id: o.id });
+      continue;
+    }
     if (PENDIENTE(o) && o.vence && o.vence < ahora) {
       o.estado = 'caducada'; o.ts_mod = ahora; cambio = true;
       eventos.push({ tipo: 'orden', ok: true, texto: `Caducó: ${textoOrden(o)}`, id: o.id });
@@ -345,7 +373,8 @@ async function ordenesApi(env: Env, c: Json): Promise<Response> {
   }
   if ((accion === 'aprobar' || accion === 'cancelar') && o) {
     o.estado = accion === 'aprobar' ? 'aprobada' : 'cancelada';
-    if (accion === 'aprobar') o.vence = Math.max(o.vence || 0, ahora + (config.orden_horas || 24) * 3600_000);
+    // Predicciones: el precio cambia rápido; aprobada vale 2 h (el ciclo corre cada 30 min).
+    if (accion === 'aprobar') o.vence = o.tipo === 'prediccion' ? ahora + 2 * 3600_000 : Math.max(o.vence || 0, ahora + (config.orden_horas || 24) * 3600_000);
     hist(o, 'usuario', accion === 'aprobar' ? 'Aprobada: se ejecuta en el próximo ciclo' : 'Cancelada');
     await guardarOrdenes(env, lista);
     await bitacora(env, [{ ts: ahora, tipo: 'orden', ok: true, texto: `${accion === 'aprobar' ? 'Aprobaste' : 'Cancelaste'}: ${textoOrden(o)}`, id: o.id }]);
@@ -468,9 +497,28 @@ async function runnerReporte(env: Env, r: Json): Promise<Response> {
   return json({ ok: true, ciclo });
 }
 
+// El runner «toma» las órdenes aprobadas justo antes de enviarlas al exchange: pasan a
+// «ejecutando» y ya no se le vuelven a mandar. Si el ciclo se cae después de operar,
+// la orden no se repite en el siguiente ciclo. Devuelve los ids tomados.
+async function runnerTomar(env: Env, c: Json): Promise<Response> {
+  const ids: string[] = Array.isArray(c.ids) ? c.ids.map(String) : [];
+  const lista = await leerOrdenes(env);
+  const ahora = Date.now(), tomadas: string[] = [];
+  for (const o of lista) {
+    if (ids.includes(o.id) && o.estado === 'aprobada' && !(o.vence && o.vence < ahora)) {
+      Object.assign(o, { estado: 'ejecutando', ts_mod: ahora });
+      tomadas.push(o.id);
+    }
+  }
+  if (tomadas.length) await guardarOrdenes(env, lista);
+  return json({ ok: true, ids: tomadas });
+}
+
 async function runnerConfig(env: Env): Promise<Response> {
   const [config, estado] = await Promise.all([leerConfig(env), leer<Json>(env, 'estado', {})]);
-  const ordenes = (await leerOrdenes(env)).filter((o) => o.estado === 'propuesta' || o.estado === 'aprobada');
+  const ahora = Date.now();
+  // Las ya vencidas no se mandan (aunque el ciclo anterior no alcanzara a marcarlas caducadas).
+  const ordenes = (await leerOrdenes(env)).filter((o) => PENDIENTE(o) && !(o.vence && o.vence < ahora));
   const ia_pref = await env.KUMO.get('ia_pref');
   const ordenes_pred = (await leerOrdenes(env)).filter((o) => o.tipo === 'prediccion').slice(0, 20);
   return json({ config, estado_runner: estado.runner || {}, ordenes, ia_pref, ordenes_pred });
@@ -720,6 +768,9 @@ const NOMBRES_SUB: Json = { 'xyz:XYZ100': 'Nasdaq 100', 'xyz:SP500': 'S&P 500', 
 const nombreSub = (s: string) => NOMBRES_SUB[s] || s.replace(/^xyz:/, '');
 // Miles con espacio (85 501) para que no se confundan con decimales (88.303).
 const cifra = (n: number) => (n >= 1000 ? String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ') : String(Number(n.toPrecision(6))));
+// Quién crea el mercado («venue»). Sin venue = Hyperliquid; los demás son creadores
+// externos con HYPE en garantía. deployerFeeScale > 0 = comisión al vender más alta.
+const CREADORES: Json = { '': 'Hyperliquid', out: 'out', skew: 'skew', txyz: 'trade.xyz' };
 const ES_DEPORTE = /sport|award|contest/i;
 const HORAS_HOY = 36;
 function nombreLado(n: unknown): string {
@@ -736,9 +787,9 @@ function leerMercado(o: Json, q: Json | undefined): Json | null {
   if (/fallback/i.test(nombre) || desc === 'other') return null;
   const perp = desc.startsWith('perp:') ? desc.split('|')[0].slice(5) : null;
   if (c.class === 'priceBinary' && c.underlying) return { tipo: 'precio', sub: c.underlying, objetivo: Number(c.targetPrice), vence: venceMs(c.expiry) };
-  if (nombre === 'template:binaryPrice' && perp) return { tipo: 'precio', sub: perp, objetivo: Number(c.threshold), vence: venceMs(c.time) };
-  if (nombre === 'template:priceTouch' && perp) return { tipo: 'toque', sub: perp, objetivo: Number(c.target), vence: venceMs(c.time) };
-  if (nombre === 'template:binaryPriceExternal') return { tipo: 'precio', externo: c.shortName || c.instrument, objetivo: Number(c.threshold), vence: venceMs(c.time) };
+  if (nombre === 'template:binaryPrice' && perp) return { tipo: 'precio', sub: perp, objetivo: Number(c.threshold), vence: venceMs(c.time), fuente: c.priceDescription };
+  if (nombre === 'template:priceTouch' && perp) return { tipo: 'toque', sub: perp, objetivo: Number(c.target), vence: venceMs(c.time), fuente: c.priceDescription };
+  if (nombre === 'template:binaryPriceExternal') return { tipo: 'precio', externo: c.shortName || c.instrument, objetivo: Number(c.threshold), vence: venceMs(c.time), fuente: c.priceDescription };
   if (cq.class === 'priceBucket' && cq.underlying && c.index != null) {
     const t = String(cq.priceThresholds || '').split(',').map(Number).filter((x) => x > 0), k = Number(c.index);
     return { tipo: 'rango', sub: cq.underlying, desde: k > 0 ? t[k - 1] : null, hasta: k < t.length ? t[k] : null, vence: venceMs(cq.expiry) };
@@ -798,11 +849,14 @@ async function listaMercados(): Promise<Json> {
       regla = `«Sí» gana si al vencer ${N} está ${m.desde == null ? `por debajo de ${cifra(m.hasta)}` : m.hasta == null ? `en ${cifra(m.desde)} o más` : `entre ${cifra(m.desde)} y ${cifra(m.hasta)}`}.`;
       lineas = [m.desde, m.hasta].filter((x) => x != null).map((p) => ({ p, t: 'límite' }));
     }
+    // Cada creador resuelve con su propia fuente de precio (p. ej. skew usa Pyth).
+    if (m.fuente && regla) regla += ` Se resuelve con: ${m.fuente}.`;
     const horas = m.vence ? Math.round((m.vence - ahora) / 360_000) / 10 : null;
     const categoria = m.categoria || (m.sub ? (m.sub.startsWith('xyz:') ? 'bolsa' : 'cripto') : m.externo ? 'bolsa' : 'otro');
     lista.push({ mercado: o.outcome, pregunta, regla: regla || null, tipo: m.tipo, categoria, plazo: horas != null && horas <= HORAS_HOY ? 'hoy' : 'mediano',
       subyacente: m.sub || null, nombre_sub: N || null, objetivo: m.tipo === 'rango' ? null : m.objetivo ?? null, desde: m.desde ?? null, hasta: m.hasta ?? null, lineas,
-      vence: m.vence || null, horas, lados, quote: o.quoteToken || 'USDC', sin_ofertas: sinOfertas || undefined });
+      vence: m.vence || null, horas, lados, quote: o.quoteToken || 'USDC', sin_ofertas: sinOfertas || undefined,
+      creador: CREADORES[String(o.venue || '')] || String(o.venue), comision_doble: Number(o.deployerFeeScale) > 0 || undefined });
   }
   // Primero los activos del mercado global, luego los subyacentes con más mercados.
   const usos: Json = {};
@@ -1248,6 +1302,7 @@ export default {
         if (req.method === 'GET' && ruta === '/runner/config') return runnerConfig(env);
         // El runner usa la misma lectura de mercados y el mismo modelo que la app.
         if (req.method === 'GET' && ruta === '/runner/predicciones') return json(await listaMercados());
+        if (req.method === 'POST' && ruta === '/runner/tomar') return runnerTomar(env, (await req.json()) as Json);
         if (req.method === 'POST' && ruta === '/runner/reporte') return runnerReporte(env, (await req.json()) as Json);
         return json({ error: 'Ruta no encontrada' }, 404);
       }

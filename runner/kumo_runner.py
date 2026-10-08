@@ -84,7 +84,25 @@ def indicadores(ex, simbolos, marco, cache=None):
     return out
 
 
-def ciclo(remoto):
+def tomar_ordenes(ids):
+    """Reserva en la nube las órdenes aprobadas antes de enviarlas («ejecutando»): si el
+    ciclo se cae después de operar, no se repiten. Devuelve los ids tomados, o None si
+    la nube no respondió (entonces no se ejecuta ninguna)."""
+    if not ids:
+        return set()
+    url = url_nube()
+    if not url:  # sin nube instalada (pruebas locales)
+        return set(ids)
+    try:
+        return set(http("POST", url + "/runner/tomar", os.getenv("KUMO_RUNNER_TOKEN", ""), {"ids": list(ids)}).get("ids") or [])
+    except Exception:
+        return None
+
+
+def ciclo(remoto, parcial=None):
+    """`parcial` (dict) recibe lo ya operado a medida que avanza: si el ciclo falla a
+    mitad, el reporte de error igual lleva las órdenes ejecutadas."""
+    parcial = parcial if parcial is not None else {}
     cfg = {**E.CONFIG_DEFECTO, **(remoto.get("config") or {})}
     ia.PREFERIDO = remoto.get("ia_pref") or None
     estado = remoto.get("estado_runner") or {}
@@ -133,12 +151,37 @@ def ciclo(remoto):
     ind = indicadores(ex, [s for s in simbolos if s in precios], cfg["marco"], cache)
 
     costos = E.actualizar_costos(estado.get("costos") or {}, saldos, precios)
+    if not simulado:
+        costos = E.costos_del_exchange(costos, getattr(base, "entradas", None))
+
+    # Mercados de predicción con el modelo (de la nube), una sola lectura por ciclo.
+    cache_pred = {}
+
+    def mercados_pred():
+        if "lista" not in cache_pred:
+            try:
+                d = http("GET", url_nube() + "/runner/predicciones", os.getenv("KUMO_RUNNER_TOKEN", ""))
+                cache_pred.update(lista=d.get("mercados") or [], glob=d.get("global"))
+            except Exception as e:
+                cache_pred.update(lista=None, glob=None, error=type(e).__name__)
+        return cache_pred["lista"]
 
     # 1) Órdenes que tú aprobaste (o creaste) y las de la IA ya aprobadas.
     ordenes_upd, ejecutadas = [], []
+    parcial.update(ordenes_upd=ordenes_upd, ejecutadas=ejecutadas)
+    # Solo se reservan las que se pueden intentar ya (las que esperan su precio siguen en cola).
+    aprobadas_ya = [o for o in pendientes if o.get("estado") == "aprobada" and O.lista_para_intentar(o, precios)]
+    if aprobadas_ya and not cfg["pausado"]:
+        tomadas = tomar_ordenes([o["id"] for o in aprobadas_ya])
+        if tomadas is None:
+            errores.append("No pude reservar tus órdenes aprobadas en la nube: no ejecuto ninguna en este ciclo (para no repetirlas). Si sigue, actualiza la nube.")
+            aprobadas_ya = []
+        else:
+            aprobadas_ya = [o for o in aprobadas_ya if o["id"] in tomadas]
     if not cfg["pausado"]:
-        for o in [o for o in pendientes if o.get("estado") == "aprobada"]:
-            upd, op = O.ejecutar(ex, o, saldos, precios, costos, cfg, simulado)
+        for o in aprobadas_ya:
+            necesita = o.get("tipo") == "prediccion" and o.get("accion") == "COMPRAR" and o.get("origen") == "ia"
+            upd, op = O.ejecutar(ex, o, saldos, precios, costos, cfg, simulado, mercados_pred() if necesita else None)
             if upd.get("_op_pago"):
                 ejecutadas.append(upd.pop("_op_pago"))
                 saldos = ex.saldos()
@@ -164,7 +207,8 @@ def ciclo(remoto):
     aprobadas, bloqueadas = E.aplicar_ia(cfg, propuestas, opiniones)
 
     # 2) Señales fuertes de la IA → órdenes nuevas (propuestas, o ejecutadas en modo auto).
-    nuevas = O.de_la_ia(cfg, opiniones, saldos, precios, pendientes)
+    nuevas = O.de_la_ia(cfg, opiniones, saldos, precios, pendientes, notas)
+    parcial["ordenes_nuevas"] = nuevas
     for i, o in enumerate(nuevas):
         o["id"] = f"ia{int(time.time())}{i}"
         o["estado"] = "propuesta"
@@ -188,7 +232,10 @@ def ciclo(remoto):
                     r = ex.comprar(sym, p["monto"])
                     E.registrar_compra(costos, sym, previa, r["cantidad"], r["precio"])
                 else:
-                    r = ex.vender(sym, min(p["cantidad"], previa))
+                    # Nunca por debajo del costo + comisión (salvo tu stop de pérdida).
+                    c = costos.get(sym) or {}
+                    minimo = O.minimo_spot(c.get("costo")) if cfg["nunca_vender_con_perdida"] and not p.get("stop") else None
+                    r = ex.vender(sym, min(p["cantidad"], previa), minimo)
                 costo = (costos.get(sym) or {}).get("costo")
                 ejecutadas.append({"ts": int(time.time()), "simbolo": sym, "accion": p["accion"], "cantidad": r["cantidad"], "precio": r["precio"], "total": round(r["total"], 2), "motivo": p["motivo"], "simulada": simulado, "pnl": round((r["precio"] / costo - 1) * 100, 2) if p["accion"] == "VENDER" and costo else None, "ia": p.get("ia")})
                 saldos = ex.saldos()
@@ -219,7 +266,7 @@ def ciclo(remoto):
                 libre_p += saldos[pagar] * ((ex.precios([pagar]).get(pagar) or {}).get("precio") or 0) * 0.97
             except ErrorExchange:
                 pass
-        nuevas_p, pred_ia = predicciones_ia(base, ex, cfg, preds, pendientes, libre_p, notas)
+        nuevas_p, pred_ia = predicciones_ia(base, ex, cfg, preds, pendientes, libre_p, notas, mercados_pred, cache_pred)
         for o in nuevas_p:
             if cfg.get("pred_ia") == "auto" and not cfg["pausado"]:
                 # «Solo corto plazo»: lo que vence más lejos queda como propuesta para que tú decidas.
@@ -227,7 +274,7 @@ def ciclo(remoto):
                     o["nota"] = f"Vence en {o.get('horas') or '?'} h: más allá de tu corto plazo ({cfg.get('pred_corto_horas') or 36} h), necesita tu aprobación"
                     continue
                 o["estado"] = "aprobada"
-                upd, op = O.ejecutar_prediccion(ex, o, simulado, cfg)
+                upd, op = O.ejecutar_prediccion(ex, o, simulado, cfg, mercados_pred())
                 if upd.get("_op_pago"):
                     ejecutadas.append(upd.pop("_op_pago"))
                     saldos = ex.saldos()
@@ -298,13 +345,19 @@ def solo_corto_ok(cfg, o):
     return h is not None and h <= float(cfg.get("pred_corto_horas") or 36)
 
 
-def predicciones_ia(base, ex, cfg, preds, pendientes, libre, notas):
+def predicciones_ia(base, ex, cfg, preds, pendientes, libre, notas, mercados_pred=None, cache=None):
     """Pide a la IA sus órdenes de predicción. Los mercados (con el modelo) vienen de
     la nube; cada orden lleva como límite el mejor precio REAL del libro (no el
     precio medio, que casi nunca se llena). Devuelve (órdenes, resumen)."""
     try:
-        datos = http("GET", url_nube() + "/runner/predicciones", os.getenv("KUMO_RUNNER_TOKEN", ""))
-        lista, glob = datos.get("mercados") or [], datos.get("global")
+        if mercados_pred is not None:
+            lista = mercados_pred()
+            if lista is None:
+                raise RuntimeError((cache or {}).get("error") or "sin mercados")
+            glob = (cache or {}).get("glob")
+        else:
+            datos = http("GET", url_nube() + "/runner/predicciones", os.getenv("KUMO_RUNNER_TOKEN", ""))
+            lista, glob = datos.get("mercados") or [], datos.get("global")
         nuevas, notas_p, resumen = PR.proponer(cfg, lista, preds, pendientes, libre, lambda c, p: ia.opinar_predicciones(c, p, glob),
                                                base.mejor_precio_prediccion, glob)
     except Exception as e:  # nunca debe tumbar el ciclo
@@ -375,6 +428,17 @@ def saldo_real(base, exchange_id, quote, saldos=None, notas=None):
     return out
 
 
+def enviar_reporte(url, token, reporte, intentos=4, espera=5):
+    """El reporte dice qué órdenes ya se ejecutaron: se reintenta si la red falla."""
+    for i in range(intentos):
+        try:
+            return http("POST", url + "/runner/reporte", token, reporte)
+        except Exception:
+            if i == intentos - 1:
+                raise
+            time.sleep(espera * (i + 1))
+
+
 def main():
     url, token = url_nube(), os.getenv("KUMO_RUNNER_TOKEN", "")
     if not url or not token:
@@ -382,8 +446,9 @@ def main():
         return 0
     remoto = http("GET", url + "/runner/config", token)
     inicio = time.time()
+    parcial = {}
     try:
-        reporte = ciclo(remoto)
+        reporte = ciclo(remoto, parcial)
         reporte["ok"] = True
     except Exception as e:  # se reporta para que la app lo muestre
         traceback.print_exc()
@@ -393,8 +458,13 @@ def main():
         reporte = {"ok": False, "exchange": os.getenv("EXCHANGE_ID", "kraken").strip().lower() or "kraken",
                    "modo": "real" if cfg.get("modo") == "real" else "simulacion",
                    "errores": [f"{type(e).__name__}: {str(e)[:300]}"]}
+        # Lo que alcanzó a operar antes del fallo también se informa (si no, la nube no
+        # sabría que esas órdenes ya se ejecutaron).
+        for k in ("ordenes_upd", "ejecutadas", "ordenes_nuevas"):
+            if parcial.get(k):
+                reporte[k] = parcial[k]
     reporte["duracion"] = round(time.time() - inicio, 1)
-    resp = http("POST", url + "/runner/reporte", token, reporte)
+    resp = enviar_reporte(url, token, reporte)
     # Sin saldos ni claves en el log: solo un resumen.
     print(f"Ciclo {resp.get('ciclo')} · ok={reporte['ok']} · ops={len(reporte.get('ejecutadas') or [])} · errores={len(reporte.get('errores') or [])}")
     return 0

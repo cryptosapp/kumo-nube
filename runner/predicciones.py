@@ -23,12 +23,46 @@ TRADUCE = {"Yes": "Sí", "No": "No", "template:Yes": "Sí", "template:No": "No"}
 # Hyperliquid al vender (~0.15 %) y un poco de redondeo.
 COMISION_VENTA = 0.003
 
+# Quién crea cada mercado («venue» en outcomeMeta). Sin venue = Hyperliquid. Los
+# creadores externos ponen en garantía HYPE, crean y resuelven sus mercados, y con
+# deployerFeeScale > 0 la comisión sube: 1.0 = el doble (la mitad es para el creador).
+CREADORES = {"": "Hyperliquid", "out": "out", "skew": "skew", "txyz": "trade.xyz"}
 
-def precio_minimo_venta(costo):
-    """Precio por unidad desde el que vender ya no pierde dinero (None si no se sabe el costo)."""
+
+def creador(o):
+    v = str((o or {}).get("venue") or "")
+    return CREADORES.get(v, v)
+
+
+def escala_de(o):
+    """deployerFeeScale del mercado (0 si no tiene)."""
+    return max(0.0, _num((o or {}).get("deployerFeeScale")) or 0.0)
+
+
+def precio_minimo_venta(costo, escala=0.0):
+    """Precio por unidad desde el que vender ya no pierde dinero (None si no se sabe el costo).
+    `escala` = deployerFeeScale del mercado: con 1.0 la comisión es el doble."""
     if not costo or costo <= 0:
         return None
-    return min(0.999, math.ceil(round(max(costo * (1 + COMISION_VENTA), costo + 0.001) * 10000, 6)) / 10000)
+    com = COMISION_VENTA * (1 + max(0.0, escala or 0.0))
+    return min(0.999, math.ceil(round(max(costo * (1 + com), costo + 0.001) * 10000, 6)) / 10000)
+
+
+_META = {"ts": 0, "datos": None}
+
+
+def escala_comision(info, oid):
+    """deployerFeeScale del mercado `oid` (outcomeMeta guardado 5 min). Si no se puede
+    leer, 1.0: ante la duda se supone la comisión alta para no vender con pérdida."""
+    try:
+        if not _META["datos"] or time.time() - _META["ts"] > 300:
+            _META.update(datos=info({"type": "outcomeMeta"}) or {}, ts=time.time())
+        for o in _META["datos"].get("outcomes") or []:
+            if o.get("outcome") == oid:
+                return escala_de(o)
+    except Exception:
+        pass
+    return 1.0
 
 
 def es_prediccion(coin):
@@ -116,6 +150,8 @@ def describir(preds, info, entradas=None):
         mids = info({"type": "allMids"}) or {}
     except Exception:  # sin red: se muestran sin precio
         meta, mids = {}, {}
+    if meta:
+        _META.update(datos=meta, ts=time.time())
     mercados = {o.get("outcome"): o for o in meta.get("outcomes") or []}
     preguntas = {}
     for q in meta.get("questions") or []:
@@ -130,6 +166,7 @@ def describir(preds, info, entradas=None):
         c = _campos(o.get("description"))
         precio = _num(mids.get(f"#{cod}"))
         costo = (entradas or {}).get(coin)
+        escala = escala_de(o) if o else 1.0
         out.append({
             "coin": coin, "mercado": oid, "lado": lado,
             "lado_nombre": TRADUCE.get(lados[lado], lados[lado]) if lado < len(lados) else ("Sí" if lado == 0 else "No"),
@@ -137,7 +174,8 @@ def describir(preds, info, entradas=None):
             "cantidad": cant, "precio": precio,
             "valor": round(cant * precio, 2) if precio is not None else None,
             "pago_si_acierta": round(cant, 2),
-            "costo": round(costo, 5) if costo else None, "min_venta": precio_minimo_venta(costo),
+            "costo": round(costo, 5) if costo else None, "min_venta": precio_minimo_venta(costo, escala),
+            "creador": creador(o) if o else None, "comision_doble": escala > 0 or None,
             "pnl_pct": round((precio / costo - 1) * 100, 2) if costo and precio is not None else None,
             "vence": _vence_ms(c.get("expiry")) or _vence_ms(_campos((preguntas.get(oid) or {}).get("description")).get("resolutionDeadline")),
             "quote": o.get("quoteToken") or "USDC",

@@ -88,7 +88,18 @@ def registrar_compra(costos, sym, cant_previa, cantidad, precio):
     prev = costos.get(sym, {}).get("costo", precio)
     total = cant_previa + cantidad
     costo = (cant_previa * prev + cantidad * precio) / total if total > 0 else precio
-    costos[sym] = {"costo": costo, "estimado": False}
+    # Si lo que ya tenías tenía costo estimado, el promedio también lo es.
+    costos[sym] = {"costo": costo, "estimado": bool(cant_previa > 0 and costos.get(sym, {}).get("estimado"))}
+
+
+def costos_del_exchange(costos, entradas):
+    """Hyperliquid informa lo que pagaste por cada moneda (entryNtl): ese costo real
+    reemplaza al que Kumo estimaba o calculaba."""
+    nuevos = dict(costos)
+    for sym, c in (entradas or {}).items():
+        if not str(sym).startswith("+") and c and c > 0:
+            nuevos[sym] = {"costo": c, "estimado": False, "fuente": "exchange"}
+    return nuevos
 
 
 def valorar(saldos, precios, quote):
@@ -141,7 +152,11 @@ def proponer(cfg, saldos, precios, indicadores, costos):
             stop = cfg["stop_perdida"] > 0 and pnl is not None and pnl <= -cfg["stop_perdida"] and not cfg["nunca_vender_con_perdida"]
             sobrepeso = peso > objetivo + cfg["banda"]
             caro = r >= cfg["rsi_venta"]
-            con_ganancia = pnl is not None and pnl >= cfg["ganancia_min"]
+            # Sin pérdida «por mínima que sea»: la ganancia exigida cubre al menos la comisión
+            # (0.5 %), y con costo estimado (no sé a cuánto la compraste) no se vende sola.
+            estimado = bool(costos.get(sym, {}).get("estimado"))
+            gan_min = max(float(cfg["ganancia_min"]), 0.5) if cfg["nunca_vender_con_perdida"] else float(cfg["ganancia_min"])
+            con_ganancia = pnl is not None and pnl >= gan_min and not (estimado and cfg["nunca_vender_con_perdida"])
             if stop:
                 propuestas.append({**base, "accion": "VENDER", "cantidad": cant, "motivo": f"Stop de pérdida ({pnl:.1f}%)", "stop": True})
                 continue
@@ -152,7 +167,10 @@ def proponer(cfg, saldos, precios, indicadores, costos):
                 propuestas.append({**base, "accion": "VENDER", "cantidad": monto / precio, "monto": round(monto, 2), "motivo": motivo})
                 continue
             if (sobrepeso or caro) and not con_ganancia:
-                notas.append(f"{sym}: vendería, pero no hay ganancia suficiente ({'—' if pnl is None else f'{pnl:.1f}%'})")
+                if estimado and cfg["nunca_vender_con_perdida"] and pnl is not None and pnl >= gan_min:
+                    notas.append(f"{sym}: vendería, pero no sé a cuánto la compraste (costo estimado): no vendo sola para no arriesgar una pérdida")
+                else:
+                    notas.append(f"{sym}: vendería, pero no hay ganancia suficiente ({'—' if pnl is None else f'{pnl:.1f}%'})")
 
         # --- Compra
         if objetivo > 0 and peso < objetivo - cfg["banda"] and r <= cfg["rsi_compra"]:

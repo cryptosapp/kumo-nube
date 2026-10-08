@@ -139,6 +139,9 @@ def ciclo(remoto):
     if not cfg["pausado"]:
         for o in [o for o in pendientes if o.get("estado") == "aprobada"]:
             upd, op = O.ejecutar(ex, o, saldos, precios, costos, cfg, simulado)
+            if upd.get("_op_pago"):
+                ejecutadas.append(upd.pop("_op_pago"))
+                saldos = ex.saldos()
             ordenes_upd.append(upd)
             if op:
                 ejecutadas.append(op)
@@ -209,7 +212,14 @@ def ciclo(remoto):
     pred_ia, revision = None, None
     pred_activo = not simulado and exchange_id == "hyperliquid" and cfg["ia"] != "off" and cfg.get("pred_ia", "proponer") != "off" and hasattr(base, "_info_hl")
     if pred_activo:
-        nuevas_p, pred_ia = predicciones_ia(base, ex, cfg, preds, pendientes, saldos.get(quote, 0.0), notas)
+        libre_p = saldos.get("USDC", saldos.get(quote, 0.0))
+        pagar = str(cfg.get("pred_pagar_con") or "").upper()
+        if pagar and pagar != "USDC" and saldos.get(pagar):
+            try:
+                libre_p += saldos[pagar] * ((ex.precios([pagar]).get(pagar) or {}).get("precio") or 0) * 0.97
+            except ErrorExchange:
+                pass
+        nuevas_p, pred_ia = predicciones_ia(base, ex, cfg, preds, pendientes, libre_p, notas)
         for o in nuevas_p:
             if cfg.get("pred_ia") == "auto" and not cfg["pausado"]:
                 # «Solo corto plazo»: lo que vence más lejos queda como propuesta para que tú decidas.
@@ -217,7 +227,10 @@ def ciclo(remoto):
                     o["nota"] = f"Vence en {o.get('horas') or '?'} h: más allá de tu corto plazo ({cfg.get('pred_corto_horas') or 36} h), necesita tu aprobación"
                     continue
                 o["estado"] = "aprobada"
-                upd, op = O.ejecutar_prediccion(ex, o, simulado)
+                upd, op = O.ejecutar_prediccion(ex, o, simulado, cfg)
+                if upd.get("_op_pago"):
+                    ejecutadas.append(upd.pop("_op_pago"))
+                    saldos = ex.saldos()
                 o.update({k: v for k, v in upd.items() if k != "id"})
                 if op:
                     ejecutadas.append(op)

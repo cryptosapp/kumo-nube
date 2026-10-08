@@ -17,8 +17,40 @@ def _cantidad_venta(o, saldos):
     return saldos.get(o["simbolo"], 0.0) * pct / 100
 
 
-def ejecutar_prediccion(ex, o, simulado):
-    """Órdenes en mercados de predicción de Hyperliquid (solo en dinero real)."""
+MIN_SPOT_HL = 10.5  # Hyperliquid pide ~10 USDC por orden spot
+
+
+def _pagar_con(ex, o, cfg, costo):
+    """Los mercados de predicción se pagan en USDC. Si falta USDC y elegiste pagar
+    con otra moneda (p. ej. HYPE), vende SOLO lo necesario (+2 %, mínimo ~10 USDC).
+    Devuelve (operación_de_venta|None, nota|None, error|None)."""
+    moneda = str(o.get("pagar_con") or (cfg or {}).get("pred_pagar_con") or "").upper()
+    if not moneda or moneda == "USDC":
+        return None, None, None
+    saldos = ex.saldos()
+    usdc = saldos.get("USDC", 0.0)
+    if usdc >= costo:
+        return None, None, None
+    precio = (ex.precios([moneda]).get(moneda) or {}).get("precio")
+    if not precio:
+        return None, None, f"No hay precio de {moneda} para pagar con él"
+    vender_usdc = max((costo - usdc) * 1.02 + 0.05, MIN_SPOT_HL)
+    cant = vender_usdc / precio
+    if saldos.get(moneda, 0.0) < cant:
+        return None, None, (f"Faltan {costo - usdc:.2f} USDC y no tienes suficiente {moneda} para cubrirlos "
+                            f"(necesito vender {cant:.4g}, tienes {saldos.get(moneda, 0.0):.4g}). No se movió nada.")
+    try:
+        r = ex.vender(moneda, cant)
+    except ErrorExchange as e:
+        return None, None, f"No pude vender {moneda} para pagar: {str(e)[:150]}. No se movió nada."
+    op = {"ts": int(time.time()), "simbolo": moneda, "accion": "VENDER", "cantidad": r["cantidad"], "precio": r["precio"], "total": round(r["total"], 2),
+          "motivo": f"Pagar predicción {o.get('etiqueta') or o.get('coin')}", "simulada": False, "pnl": None, "orden": o.get("id")}
+    return op, f"Vendí {r['cantidad']:.4g} {moneda} ({r['total']:.2f} USDC) para pagarla", None
+
+
+def ejecutar_prediccion(ex, o, simulado, cfg=None):
+    """Órdenes en mercados de predicción de Hyperliquid (solo en dinero real).
+    Si en la respuesta viene «_op_pago», es la venta de la moneda con la que se pagó."""
     upd = {"id": o["id"]}
     if simulado:
         return {**upd, "estado": "error", "error": "Las predicciones solo se operan en dinero real"}, None
@@ -29,10 +61,21 @@ def ejecutar_prediccion(ex, o, simulado):
     except (KeyError, TypeError, ValueError):
         return {**upd, "estado": "error", "error": "Orden de predicción incompleta"}, None
     compra = o["accion"] == "COMPRAR"
+    op_pago, nota_pago = None, None
+    if compra and (o.get("pagar_con") or (cfg or {}).get("pred_pagar_con")):
+        # Antes de vender tu moneda, comprueba que la predicción se puede llenar a tu límite.
+        mejor = ex.mejor_precio_prediccion(cod, True) if hasattr(ex, "mejor_precio_prediccion") else None
+        if mejor is not None and mejor.get("precio") and mejor["precio"] > lim:
+            return {**upd, "estado": "error", "error": f"No se llenaría: el más barato vende a {mejor['precio']:g} y tu límite es {lim:g}. No vendí nada.", "mejor": mejor}, None
+        op_pago, nota_pago, err = _pagar_con(ex, o, cfg, unidades * lim)
+        if err:
+            return {**upd, "estado": "error", "error": err}, None
+        if op_pago:
+            upd["_op_pago"] = op_pago
     try:
         r = ex.orden_prediccion(cod, compra, unidades, lim)
     except ErrorExchange as e:
-        return {**upd, "estado": "error", "error": str(e)[:200]}, None
+        return {**upd, "estado": "error", "error": str(e)[:200] + (f" ({nota_pago}: esos USDC quedan libres)" if nota_pago else "")}, None
     if r["cantidad"] <= 0:
         mejor = r.get("mejor")
         if mejor and mejor.get("precio"):
@@ -40,11 +83,12 @@ def ejecutar_prediccion(ex, o, simulado):
                      else f" El mejor comprador pagaba {mejor['precio']:g} ({mejor['unidades']:g} u.): reintenta con límite {mejor['precio']:g} o menos.")
         else:
             pista = f" No había {'vendedores' if compra else 'compradores'} en el libro: prueba más tarde."
-        return {**upd, "estado": "error", "error": f"No se llenó: nadie {'vendía' if compra else 'compraba'} a {lim:g} o mejor. No se movió nada.{pista}", "mejor": mejor}, None
+        movido = f" {nota_pago}: esos USDC quedan libres." if nota_pago else " No se movió nada."
+        return {**upd, "estado": "error", "error": f"No se llenó: nadie {'vendía' if compra else 'compraba'} a {lim:g} o mejor.{movido}{pista}", "mejor": mejor}, None
     etiqueta = o.get("etiqueta") or o["coin"]
     op = {"ts": int(time.time()), "simbolo": etiqueta, "accion": o["accion"], "cantidad": r["cantidad"], "precio": r["precio"],
           "total": round(r["total"], 2), "motivo": f"Predicción {etiqueta}", "simulada": False, "pnl": None, "orden": o["id"], "prediccion": o["coin"]}
-    nota = f"Se llenaron {r['cantidad']:g} de {unidades}" if r["cantidad"] < unidades else None
+    nota = "; ".join(x for x in (f"Se llenaron {r['cantidad']:g} de {unidades}" if r["cantidad"] < unidades else None, nota_pago) if x) or None
     return {**upd, "estado": "ejecutada", "nota": nota, "resultado": {"precio": r["precio"], "cantidad": r["cantidad"], "total": round(r["total"], 2), "ts": int(time.time() * 1000)}}, op
 
 
@@ -52,7 +96,7 @@ def ejecutar(ex, o, saldos, precios, costos, cfg, simulado):
     """Intenta ejecutar una orden aprobada. Devuelve (actualizacion, operacion|None).
     Si aún no se cumple su condición, la orden sigue «aprobada» con una nota."""
     if o.get("tipo") == "prediccion":
-        return ejecutar_prediccion(ex, o, simulado)
+        return ejecutar_prediccion(ex, o, simulado, cfg)
     sym, acc = o["simbolo"], o["accion"]
     upd = {"id": o["id"]}
     precio = precios.get(sym)

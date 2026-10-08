@@ -30,7 +30,7 @@ const CONFIG_DEFECTO: Json = {
   // Beta: la IA revisa los mercados de predicción en cada ciclo.
   pred_ia: 'proponer', pred_monto: 11, pred_max_total: 30, pred_ventaja: 8, pred_conf_min: 65, pred_max_ciclo: 1,
   pred_prob_min: 5, pred_prob_max: 95, pred_horas_min: 1, pred_categorias: ['cripto_hoy'], pred_vender_ia: true, pred_tomar_ganancia: 0,
-  pred_auto_solo_corto: true, pred_corto_horas: 36,
+  pred_auto_solo_corto: true, pred_corto_horas: 36, pred_pagar_con: '',
   pred_supervisor: true, pred_monto_techo: 11, pred_max_total_techo: 30, pred_supervisor_log: [],
 };
 const PRED_CATEGORIAS = ['cripto_hoy', 'cripto_mediano', 'bolsa'];
@@ -114,6 +114,8 @@ function validarConfig(actual: Json, cambios: Json): { config?: Json; error?: st
   }
   if (cambios.pred_vender_ia !== undefined) c.pred_vender_ia = Boolean(cambios.pred_vender_ia);
   if (cambios.pred_supervisor !== undefined) c.pred_supervisor = Boolean(cambios.pred_supervisor);
+  // Moneda que se vende si falta USDC para pagar una predicción ('' = solo USDC).
+  if (cambios.pred_pagar_con !== undefined) c.pred_pagar_con = cambios.pred_pagar_con ? limpiarSimbolo(cambios.pred_pagar_con) : '';
   if (cambios.pred_auto_solo_corto !== undefined) c.pred_auto_solo_corto = Boolean(cambios.pred_auto_solo_corto);
   // Lo que pone el usuario es el techo: el supervisor IA solo puede bajarlo.
   if (cambios.pred_monto !== undefined) c.pred_monto_techo = c.pred_monto;
@@ -262,6 +264,7 @@ function limpiarPrediccion(base: Json, c: Json, config: Json): { orden?: Json; e
   if (!(l >= 0.001 && l <= 0.999)) return { error: 'El precio límite va de 0.001 a 0.999' };
   o.unidades = u; o.limite = Number(l.toPrecision(5)); o.simbolo = o.coin;
   if (c.etiqueta !== undefined) o.etiqueta = String(c.etiqueta).slice(0, 90);
+  if (c.pagar_con !== undefined) { const m = c.pagar_con ? limpiarSimbolo(c.pagar_con) : ''; if (m) o.pagar_con = m; else delete o.pagar_con; } // 'USDC' = esta orden solo con USDC
   if (c.razon !== undefined) o.razon = String(c.razon).slice(0, 240);
   o.quote = config.quote; delete o.monto; delete o.pct;
   return { orden: o };
@@ -890,7 +893,7 @@ async function prediccionPedir(env: Env, c: Json): Promise<Response> {
       { role: 'system', content: 'Preparas órdenes en mercados de predicción de Hyperliquid para un usuario principiante. Prudente: si nada convence, no propongas nada y explícalo. Nunca inventas mercados: usa solo los «coin» de la lista. Respondes SOLO JSON válido en español.' },
       { role: 'user', content: `El usuario pide: "${instruccion}"
 Cada unidad paga 1 USDC si acierta y 0 si no; el precio es la probabilidad del mercado. «modelo_pct» es un modelo estadístico de volatilidad (no es certeza); «ventaja» = modelo − precio en puntos.
-USDC libres: ${libre ?? 'desconocido'}. Por compra suele usar ${config.pred_monto} USDC (mínimo 10). Tope total en predicciones: ${config.pred_max_total} USDC.
+USDC libres: ${libre ?? 'desconocido'}.${config.pred_pagar_con ? ` Si falta USDC, Kumo vende ${config.pred_pagar_con} para pagar (tiene ${(estado.ultimo?.activos || []).find((a: Json) => a.simbolo === config.pred_pagar_con)?.valor ?? '?'} USDC en ${config.pred_pagar_con}).` : ''} Por compra suele usar ${config.pred_monto} USDC (mínimo 10). Tope total en predicciones: ${config.pred_max_total} USDC.
 Sus posiciones: ${JSON.stringify(pos)}
 Mercados abiertos (los más relevantes a su pedido): ${JSON.stringify(filas)}
 Propón como mucho 3 órdenes. COMPRAR lleva "monto_usdc"; VENDER (solo de sus posiciones) lleva "unidades".
@@ -923,7 +926,7 @@ Formato: {"respuesta":"2-4 frases para el usuario","propuestas":[{"coin":"#90170
     if (accion === 'COMPRAR' && expuesto + unidades * px > (config.pred_max_total || 30) + 0.5) {
       descartadas.push(`${etiqueta}: pasaría tu tope de ${config.pred_max_total} USDC en predicciones (ya usas ${expuesto.toFixed(2)})`); continue;
     }
-    const v = limpiarPrediccion({}, { coin, accion, unidades, limite: px, etiqueta, razon: String(x.razon || '') }, config);
+    const v = limpiarPrediccion({}, { coin, accion, unidades, limite: px, etiqueta, razon: String(x.razon || ''), pagar_con: accion === 'COMPRAR' ? config.pred_pagar_con : '' }, config);
     if (!v.orden) { descartadas.push(`${etiqueta}: ${v.error}`); continue; }
     const conf = Math.max(0, Math.min(100, Number(x.confianza) || 0));
     const n: Json = { ...v.orden, id: nuevoId('iap'), ts: ahora, origen: 'ia', estado: 'propuesta', confianza: conf,

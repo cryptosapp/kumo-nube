@@ -385,6 +385,20 @@ async function ordenesApi(env: Env, c: Json): Promise<Response> {
     await bitacora(env, [{ ts: ahora, tipo: 'orden', ok: true, texto: `${accion === 'aprobar' ? 'Aprobaste' : 'Cancelaste'}: ${textoOrden(o)}`, id: o.id }]);
     return json({ ok: true, orden: o });
   }
+  // Borra de la nube las órdenes ya cerradas (ejecutadas, canceladas, caducadas, con error)
+  // para liberar espacio. Las pendientes y las que se están ejecutando nunca se tocan.
+  if (accion === 'limpiar') {
+    if (c.confirmed !== true) return json({ error: 'Falta confirmar el borrado' }, 400);
+    const solo = c.tipo === 'prediccion' ? 'prediccion' : null;
+    const viva = (x: Json) => PENDIENTE(x) || x.estado === 'ejecutando';
+    const quedan = lista.filter((x) => viva(x) || (solo && x.tipo !== solo));
+    const borradas = lista.length - quedan.length;
+    if (borradas) {
+      await guardarOrdenes(env, quedan);
+      await bitacora(env, [{ ts: ahora, tipo: 'orden', ok: true, texto: `Borraste ${borradas} ${borradas === 1 ? 'orden pasada' : 'órdenes pasadas'}${solo ? ' de predicción' : ''} de tu nube` }]);
+    }
+    return json({ ok: true, borradas, quedan: quedan.length });
+  }
   if (accion === 'ia') {
     const instruccion = String(c.instruccion || '').trim().slice(0, 400);
     if (!instruccion) return json({ error: 'Escribe qué quieres que haga la IA' }, 400);

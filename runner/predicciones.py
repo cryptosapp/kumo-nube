@@ -15,6 +15,8 @@ import re
 import time
 from datetime import datetime, timezone
 
+import feedback as FB
+
 PATRON = re.compile(r"^\+(\d+)$")
 TRADUCE = {"Yes": "Sí", "No": "No", "template:Yes": "Sí", "template:No": "No"}
 
@@ -217,17 +219,21 @@ def categoria(m):
 EXTRA_TURBULENCIA = 4
 
 
-def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None, glob=None):
+def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None, glob=None, fb=None):
     """La IA revisa los mejores candidatos y tus posiciones. Devuelve
     (órdenes_nuevas, notas, resumen). Con `libro(cod, comprar)` cada candidato se
     comprueba contra el mejor precio REAL antes de gastar una consulta de IA, y la
     orden sale con ese precio como límite. `glob` es el mercado global de la nube:
     con turbulencia global (o del subyacente) se exige más ventaja.
-    `opinar(candidatos, posiciones)` → ({coin: {accion, confianza, prob, razon}}, modelo, error)."""
+    `opinar(candidatos, posiciones)` → ({coin: {accion, confianza, prob, razon}}, modelo, error).
+    `fb` = resumen del feedback (feedback.resumir): si una categoría viene perdiendo o hay
+    racha de pérdidas, pide más confianza y menos compras. Nunca afloja lo que pusiste."""
     ventaja_min = float(cfg.get("pred_ventaja") or 8)
     monto, tope = float(cfg.get("pred_monto") or 11), float(cfg.get("pred_max_total") or 30)
     conf_min = float(cfg.get("pred_conf_min") if cfg.get("pred_conf_min") is not None else cfg.get("ia_conf_min") or 65)
     max_ciclo = int(cfg.get("pred_max_ciclo") or 1)
+    if ((fb or {}).get("ajustes") or {}).get("max_ciclo"):
+        max_ciclo = min(max_ciclo, int(fb["ajustes"]["max_ciclo"]))
     pmin, pmax = float(cfg.get("pred_prob_min") or 5) / 100, float(cfg.get("pred_prob_max") or 95) / 100
     horas_min = float(cfg.get("pred_horas_min") if cfg.get("pred_horas_min") is not None else 1)
     cats = set(cfg.get("pred_categorias") or ["cripto_hoy"])
@@ -270,7 +276,7 @@ def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None, glob
                       "distancia_pct": m.get("distancia_pct"), "horas_para_vencer": m.get("horas"), "cambio_1h_pct": m.get("cambio_1h_pct"),
                       "cambio_24h_pct": m.get("cambio_24h_pct"), "cambio_48h_pct": m.get("cambio_48h_pct"),
                       "mov_tipico_1h_24h_48h_pct": [m["mov"].get("h1"), m["mov"].get("h24"), m["mov"].get("h48")] if m.get("mov") else None,
-                      "volatilidad": m.get("regimen")})
+                      "volatilidad": m.get("regimen"), "categoria": categoria(m)})
 
     revisar = []
     for p in posiciones:
@@ -324,6 +330,10 @@ def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None, glob
         o = opin.get(c["coin"]) or {}
         if compras >= max_ciclo or o.get("accion") != "COMPRAR" or o.get("confianza", 0) < conf_min:
             continue
+        extra = FB.conf_extra(fb, c["categoria"])
+        if extra and o["confianza"] < conf_min + extra:
+            notas.append(f"Feedback: la IA quería comprar «{c['pregunta']} · {c['lado']}» con confianza {o['confianza']}, pero por los resultados recientes ahora se exige {conf_min + extra:g}")
+            continue
         if o.get("prob") is not None and o["prob"] / 100 < c["precio"] + 0.03:
             continue  # la propia IA no ve margen suficiente
         # Con menos USDC libre (o cerca del tope) compra por lo que alcance, desde ~1 USDC.
@@ -335,8 +345,8 @@ def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None, glob
             break
         nuevas.append({"tipo": "prediccion", "coin": c["coin"], "accion": "COMPRAR", "unidades": u,
                        "limite": c["precio"], "etiqueta": f"{c['pregunta']} · {c['lado']}", "razon": o.get("razon", ""),
-                       "confianza": o["confianza"], "origen": "ia", "horas": c["horas_para_vencer"],
-                       "ia": {"accion": "COMPRAR", "confianza": o["confianza"], "razon": o.get("razon", ""), "prob": o.get("prob")}})
+                       "confianza": o["confianza"], "origen": "ia", "horas": c["horas_para_vencer"], "categoria": c["categoria"],
+                       "ia": {"accion": "COMPRAR", "confianza": o["confianza"], "razon": o.get("razon", ""), "prob": o.get("prob"), "votos": o.get("votos")}})
         expuesto += u * c["precio"]
         libre -= u * c["precio"]
         compras += 1

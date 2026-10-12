@@ -43,7 +43,7 @@ TIMEOUT = 45
 PREFERIDO = None
 # Lista de proveedores que manda la nube: [{id, url, key, modelos}] (None = nube vieja).
 PROVEEDORES = None
-# Consenso: {"enabled": bool, "size": 2-5}.
+# Consenso: {"enabled": bool, "size": 2-5, o 0 = todos los modelos activos (hasta 5)}.
 CONSENSO = {"enabled": False, "size": 3}
 
 
@@ -52,7 +52,9 @@ def configurar(lista=None, consenso=None):
     global PROVEEDORES, CONSENSO
     PROVEEDORES = [p for p in (lista or []) if p.get("url") and p.get("modelos")] or None
     c = consenso or {}
-    CONSENSO = {"enabled": bool(c.get("enabled")), "size": max(2, min(5, int(c.get("size") or 3)))}
+    size = c.get("size")
+    # size 0 = «todas»: votan todos tus modelos activos (hasta 5).
+    CONSENSO = {"enabled": bool(c.get("enabled")), "size": 0 if size == 0 else max(2, min(5, int(size or 3)))}
 
 
 def _id_de_url(url):
@@ -235,37 +237,41 @@ def elegir_votantes(n):
     return primero + resto
 
 
+def tamano_consenso():
+    """Cuántas IAs votan: las que elegiste (2–5) o, con «todas» (size 0), todos tus
+    modelos activos hasta 5."""
+    total = len(_candidatos())
+    return min(5, total) if not CONSENSO["size"] else min(CONSENSO["size"], total)
+
+
 def consultar_varias(mensajes, n, valido=lambda d: True):
-    """Pregunta a `n` IAs en paralelo; si responde menos de la mitad, sigue una a una con
-    las siguientes (si no responde ninguna, esto es la cadena de respaldo). Una respuesta
-    que no trae ningún voto válido (`valido`) cuenta como fallida: «formato inválido».
-    Devuelve ([(etiqueta, datos)], [errores])."""
-    cola = elegir_votantes(n)
-    primeras, resto = cola[:n], cola[n:]
-    ok, errores = [], []
+    """Pregunta a `n` IAs en paralelo y, si alguna falla, llama a las siguientes de tu
+    lista hasta juntar `n` votos o quedarse sin modelos (como mucho n + 6 llamadas).
+    Una respuesta que no trae ningún voto válido (`valido`) cuenta como fallida:
+    «formato inválido». Devuelve ([(etiqueta, datos)], [errores])."""
+    cola = elegir_votantes(n)[:n + 6]
+    con_clave = {p["nombre"] for p, _ in cola if p.get("key")}
+    ok, errores, caidos = [], [], set()
 
     def una(pm):
         prov, modelo = pm
         return pm, preguntar(prov, modelo, mensajes)
 
-    def anotar(prov, modelo, datos, err):
-        if datos is not None and valido(datos):
-            ok.append((modelo, datos))
-        else:
-            errores.append({"proveedor": prov["nombre"], "modelo": modelo, "error": err[1] if err else "formato inválido"})
-
-    with ThreadPoolExecutor(max_workers=len(primeras) or 1) as ex:
-        for (prov, modelo), (datos, err) in ex.map(una, primeras):
-            anotar(prov, modelo, datos, err)
-    con_clave = {p["nombre"] for p, _ in cola if p.get("key")}
-    caidos = {e["proveedor"] for e in errores if e["error"] in ("HTTP 401", "HTTP 403") and e["proveedor"] in con_clave}
-    for prov, modelo in resto:
-        if len(ok) * 2 >= n:
-            break
-        if prov["nombre"] in caidos:
+    while cola and len(ok) < n:
+        ronda, cola = cola[:n - len(ok)], cola[n - len(ok):]
+        ronda = [pm for pm in ronda if pm[0]["nombre"] not in caidos]
+        if not ronda:
             continue
-        datos, err = preguntar(prov, modelo, mensajes)
-        anotar(prov, modelo, datos, err)
+        with ThreadPoolExecutor(max_workers=len(ronda)) as ex:
+            for (prov, modelo), (datos, err) in ex.map(una, ronda):
+                if datos is not None and valido(datos):
+                    ok.append((modelo, datos))
+                    continue
+                error = err[1] if err else "formato inválido"
+                errores.append({"proveedor": prov["nombre"], "modelo": modelo, "error": error})
+                # Una clave rechazada salta los demás modelos de ese proveedor.
+                if error in ("HTTP 401", "HTTP 403") and prov["nombre"] in con_clave:
+                    caidos.add(prov["nombre"])
     return ok, errores
 
 
@@ -276,18 +282,18 @@ def corto(modelo):
 
 def votar(votos, espera):
     """votos = [(modelo, {accion, confianza, razon, prob?})] de UN activo.
-    Suma la confianza por acción (mínimo 0.01 por voto); gana la mayor y, si hay empate,
-    `espera` (ESPERAR / NO ENTRAR / MANTENER). Confianza final = media de quienes votaron
-    la ganadora × (0.5 + 0.5 × acuerdo): con 3/3 se conserva, con 2/3 baja un 17 %."""
+    Cada IA es un voto: gana la acción con más votos y, si hay empate, `espera`
+    (ESPERAR / NO ENTRAR / MANTENER). Confianza final = media de quienes votaron la
+    ganadora × (0.5 + 0.5 × acuerdo): con 3/3 se conserva, con 2/3 baja un 17 %."""
     if not votos:
         return None
     if len(votos) == 1:
         return dict(votos[0][1])
-    suma = {}
+    cuenta = {}
     for _, v in votos:
-        suma[v["accion"]] = suma.get(v["accion"], 0.0) + max(0.01, float(v.get("confianza") or 0))
-    mejor = max(suma.values())
-    ganadoras = [a for a, s in suma.items() if abs(s - mejor) < 1e-9]
+        cuenta[v["accion"]] = cuenta.get(v["accion"], 0) + 1
+    mejor = max(cuenta.values())
+    ganadoras = [a for a, k in cuenta.items() if k == mejor]
     accion = ganadoras[0] if len(ganadoras) == 1 else espera
     a_favor = [v for _, v in votos if v["accion"] == accion]
     acuerdo = len(a_favor) / len(votos)
@@ -309,7 +315,7 @@ def decidir(mensajes, leer, espera):
     """Consenso si está activo y hay al menos 2 IAs; si no, cadena de respaldo.
     `leer(datos)` → {clave: opinión}; `espera(clave)` = acción si hay empate.
     Devuelve ({clave: opinión}, modelo, error)."""
-    n = CONSENSO["size"]
+    n = tamano_consenso()
     if not CONSENSO["enabled"] or len(_candidatos()) < 2:
         datos, modelo, error = chat_json(mensajes)
         return (leer(datos), modelo, None) if datos is not None else ({}, None, error)
@@ -337,7 +343,7 @@ def varias_json(mensajes, valido=lambda d: True):
         if datos is None:
             return [], error
         return ([(modelo, datos)], None) if valido(datos) else ([], f"{corto(modelo)}: formato inválido")
-    ok, errores = consultar_varias(mensajes, CONSENSO["size"], valido)
+    ok, errores = consultar_varias(mensajes, tamano_consenso(), valido)
     for e in errores:
         if e["error"] == "formato inválido":
             LOG.append({"ts": int(time.time() * 1000), "proveedor": e["proveedor"], "modelo": e["modelo"], "ok": False, "ms": 0, "error": "formato inválido (no se contó su voto)"})
@@ -427,7 +433,7 @@ def _leer_pred(datos):
     return out
 
 
-def opinar_predicciones(candidatos, posiciones, glob=None, noticias=None):
+def opinar_predicciones(candidatos, posiciones, glob=None, noticias=None, feedback=None):
     """La IA revisa mercados de predicción con ventaja según el modelo y tus
     posiciones, con el mercado global y las noticias de 24 h como contexto.
     Devuelve ({"#N": {accion, confianza, prob, razon}}, modelo, error)."""
@@ -443,6 +449,8 @@ def opinar_predicciones(candidatos, posiciones, glob=None, noticias=None):
                    "exigente con apuestas a que el precio suba o se mantenga quieto.\n")
     if noticias:
         pedido += f"Titulares de las últimas 24 h: {json.dumps(noticias[:12], ensure_ascii=False)}\n"
+    if feedback:
+        pedido += feedback + "\n"
     if candidatos:
         pedido += ("Candidatos para ENTRAR (el modelo les ve ventaja). Para cada uno: COMPRAR o NO ENTRAR.\n"
                    f"{json.dumps(candidatos, ensure_ascii=False)}\n")

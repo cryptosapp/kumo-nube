@@ -17,6 +17,7 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(__file__))
 
 import estrategia as E  # noqa: E402
+import feedback as FB  # noqa: E402
 import ia  # noqa: E402
 import noticias as N  # noqa: E402
 import ordenes as O  # noqa: E402
@@ -280,6 +281,10 @@ def ciclo(remoto, parcial=None):
     # 3) Beta: la IA revisa los mercados de predicción y tus posiciones en cada ciclo
     #    y propone órdenes (o las ejecuta si activaste «IA ejecuta sola»).
     pred_ia, revision = None, None
+    # Feedback en movimiento: resultados de las decisiones anteriores (de ciclos pasados).
+    seguir_fb = not simulado and exchange_id == "hyperliquid" and hasattr(base, "_info_hl")
+    fb_previo = estado.get("feedback") if seguir_fb else None
+    fb_antes = FB.resumir(fb_previo) if seguir_fb and cfg.get("pred_feedback", True) is not False else None
     pred_activo = not simulado and exchange_id == "hyperliquid" and cfg["ia"] != "off" and cfg.get("pred_ia", "proponer") != "off" and hasattr(base, "_info_hl")
     if pred_activo:
         libre_p = saldos.get("USDC", saldos.get(quote, 0.0))
@@ -289,7 +294,7 @@ def ciclo(remoto, parcial=None):
                 libre_p += saldos[pagar] * ((ex.precios([pagar]).get(pagar) or {}).get("precio") or 0) * 0.97
             except ErrorExchange:
                 pass
-        nuevas_p, pred_ia = predicciones_ia(base, ex, cfg, preds, pendientes, libre_p, notas, mercados_pred, cache_pred, titulares)
+        nuevas_p, pred_ia = predicciones_ia(base, ex, cfg, preds, pendientes, libre_p, notas, mercados_pred, cache_pred, titulares, fb_antes)
         for o in nuevas_p:
             if cfg.get("pred_ia") == "auto" and not cfg["pausado"]:
                 # «Solo corto plazo»: lo que vence más lejos queda como propuesta para que tú decidas.
@@ -312,9 +317,24 @@ def ciclo(remoto, parcial=None):
         # Supervisor IA: cada 6 h revisa cómo van y puede ajustar los parámetros (con límites).
         if SUP.toca(cfg, (remoto.get("estado_runner") or {}).get("super_ts")):
             try:
-                revision = SUP.revisar(cfg, remoto.get("ordenes_pred") or [], preds, pred_ia, ia.varias_json)
+                revision = SUP.revisar(cfg, remoto.get("ordenes_pred") or [], preds, pred_ia, ia.varias_json, FB.para_ia(fb_antes))
             except Exception as e:  # nunca debe tumbar el ciclo
                 notas.append(f"Supervisor IA: {type(e).__name__}")
+
+    fb_registro, fb_resumen = None, None
+    if seguir_fb:
+        try:
+            lista_fb = cache_pred.get("lista") or []
+            ahora_ms = int(time.time() * 1000)
+            # Decisiones de este ciclo primero (aún no están en la nube) y luego las anteriores.
+            de_hoy = [{**o, "ts_mod": ahora_ms} for o in nuevas if o.get("tipo") == "prediccion"]
+            de_hoy += [{**o, **u, "ts_mod": ahora_ms} for o in pendientes for u in ordenes_upd if u.get("id") == o.get("id")]
+            fb_registro = FB.actualizar(fb_previo, preds, de_hoy + (remoto.get("ordenes_pred") or []), ejecutadas,
+                                        {m["mercado"]: PR.categoria(m) for m in lista_fb}, lambda sub, ms: precio_al_vencer(base, sub, ms), ahora_ms)
+            fb_resumen = {**FB.resumir(fb_registro, ahora_ms), "activo": cfg.get("pred_feedback", True) is not False,
+                          "recientes": [{k: c.get(k) for k in ("ts", "tipo", "etiqueta", "categoria", "como", "resultado", "pnl", "confianza", "origen")} for c in fb_registro["cerradas"][:12]]}
+        except Exception as e:  # nunca debe tumbar el ciclo
+            notas.append(f"Feedback: {type(e).__name__}")
 
     precios_fin = dict(precios)
     total, activos = E.valorar(saldos, precios_fin, quote)
@@ -356,6 +376,8 @@ def ciclo(remoto, parcial=None):
         "graficas": graf,
         "predicciones": preds, "valor_predicciones": valor_preds, "pred_ia": pred_ia,
         "supervisor": revision,
+        # Registro de decisiones y resultados (la nube lo guarda y lo devuelve en el próximo ciclo).
+        "feedback": fb_registro, "feedback_resumen": fb_resumen,
         # Ventas que el candado frenó (P/L < +0.5 % o costo desconocido): se ven en la bitácora.
         "bloqueos_perdida": O.BLOQUEOS[-10:],
         "ia_consenso": {**ia.CONSENSO, "proveedores": [p["nombre"] for p in ia.proveedores()]},
@@ -371,7 +393,14 @@ def solo_corto_ok(cfg, o):
     return h is not None and h <= float(cfg.get("pred_corto_horas") or 36)
 
 
-def predicciones_ia(base, ex, cfg, preds, pendientes, libre, notas, mercados_pred=None, cache=None, titulares=None):
+def precio_al_vencer(base, subyacente, ms):
+    """Cierre de la vela de 1 minuto que termina en el vencimiento (Hyperliquid), o None."""
+    velas = base._info_hl({"type": "candleSnapshot", "req": {"coin": subyacente, "interval": "1m", "startTime": ms - 180_000, "endTime": ms + 60_000}}) or []
+    antes = [v for v in velas if int(v.get("t") or 0) < ms]
+    return float(antes[-1]["c"]) if antes else None
+
+
+def predicciones_ia(base, ex, cfg, preds, pendientes, libre, notas, mercados_pred=None, cache=None, titulares=None, fb=None):
     """Pide a la IA sus órdenes de predicción. Los mercados (con el modelo) vienen de
     la nube; cada orden lleva como límite el mejor precio REAL del libro (no el
     precio medio, que casi nunca se llena). Devuelve (órdenes, resumen)."""
@@ -384,8 +413,8 @@ def predicciones_ia(base, ex, cfg, preds, pendientes, libre, notas, mercados_pre
         else:
             datos = http("GET", url_nube() + "/runner/predicciones", os.getenv("KUMO_RUNNER_TOKEN", ""))
             lista, glob = datos.get("mercados") or [], datos.get("global")
-        nuevas, notas_p, resumen = PR.proponer(cfg, lista, preds, pendientes, libre, lambda c, p: ia.opinar_predicciones(c, p, glob, titulares),
-                                               base.mejor_precio_prediccion, glob)
+        nuevas, notas_p, resumen = PR.proponer(cfg, lista, preds, pendientes, libre, lambda c, p: ia.opinar_predicciones(c, p, glob, titulares, FB.para_ia(fb)),
+                                               base.mejor_precio_prediccion, glob, fb)
     except Exception as e:  # nunca debe tumbar el ciclo
         notas.append(f"IA predicciones: {type(e).__name__}")
         return [], None

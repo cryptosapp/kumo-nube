@@ -299,7 +299,7 @@ class MercadoGlobal(unittest.TestCase):
         m.update({"mov": {"h1": 0.4, "h24": 2.1, "h48": 3.0}, "regimen": "normal", "cambio_1h_pct": 0.2})
         visto = {}
 
-        def opinar(c, p, glob=None, noticias=None):
+        def opinar(c, p, glob=None, noticias=None, feedback=None):
             visto.update(cands=c, glob=glob)
             return OPS, "m", None
         glob = {"resumen": "24 h: cripto +1%, bolsa −0.4%.", "turbulencia": False}

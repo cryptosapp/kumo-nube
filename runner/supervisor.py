@@ -75,7 +75,7 @@ def unir(cfg, respuestas):
     return limpiar(cfg, out), apoyo
 
 
-def revisar(cfg, ordenes, posiciones, resumen, varias_json):
+def revisar(cfg, ordenes, posiciones, resumen, varias_json, feedback=None):
     """Devuelve {"ts", "cambios", "razon", "modelo"} (cambios puede venir vacío) o None si la IA falla.
     `varias_json(mensajes, valido)` → ([(modelo, datos)], error): con consenso, varias IAs."""
     actual = {k: cfg.get(k) for k in list(AJUSTABLES) + ["pred_categorias"]}
@@ -98,6 +98,7 @@ def revisar(cfg, ordenes, posiciones, resumen, varias_json):
             f"Últimas órdenes de predicción: {hist}\n"
             f"Posiciones abiertas: {pos}\n"
             f"Revisión del último ciclo: {resumen}\n"
+            + (f"{feedback}\n" if feedback else "") +
             'Formato: {"cambios":{"pred_ventaja":10},"razon":"máx. 40 palabras"}'
         )},
     ]

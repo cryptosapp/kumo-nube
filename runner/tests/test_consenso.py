@@ -112,6 +112,48 @@ class Consenso(Base):
         self.assertEqual(out["#90171"]["accion"], "MANTENER")
 
 
+class Mayoria(Base):
+    """beta21: cada modelo es un voto, se completan los votos pedidos y «todas» = hasta 5."""
+    G, Q, GE, K = "openai/gpt-oss-120b", "qwen/qwen3.8-27b", "gemini-3.1-flash", "nvidia/nemotron-3-super-120b-a12b:free"
+
+    def test_gana_la_mayoria_aunque_la_minoria_tenga_mas_confianza(self):
+        p, _ = self.con({self.G: resp("BTC", "ESPERAR", 95), self.GE: resp("BTC", "COMPRAR", 40, "rebote"), self.K: resp("BTC", "COMPRAR", 45)})
+        with p:
+            out, _, _ = ia.opinar(PROP, {})
+        self.assertEqual(out["BTC"]["accion"], "COMPRAR")
+        self.assertTrue(out["BTC"]["razon"].startswith("Consenso 2/3"))
+
+    def test_si_una_falla_entra_la_siguiente_hasta_juntar_los_votos(self):
+        p, llamadas = self.con({self.G: resp("BTC", "COMPRAR", 70), self.GE: err(429), self.K: resp("BTC", "COMPRAR", 60), self.Q: resp("BTC", "ESPERAR", 50)})
+        with p:
+            out, modelo, _ = ia.opinar(PROP, {})
+        self.assertEqual([m for m, _ in llamadas][-1], self.Q)
+        self.assertEqual(modelo, "consenso:gpt-oss-120b+nemotron-3-super-120b-a12b+qwen3.8-27b")
+        self.assertTrue(out["BTC"]["razon"].startswith("Consenso 2/3"))
+
+    def test_todas_usa_todos_los_modelos_activos(self):
+        ia.configurar(LISTA, {"enabled": True, "size": 0})
+        self.assertEqual(ia.tamano_consenso(), 4)
+        p, llamadas = self.con({self.G: resp("BTC", "COMPRAR", 70), self.GE: resp("BTC", "COMPRAR", 60), self.K: resp("BTC", "ESPERAR", 60), self.Q: resp("BTC", "COMPRAR", 50)})
+        with p:
+            out, _, _ = ia.opinar(PROP, {})
+        self.assertEqual(len(llamadas), 4)
+        self.assertTrue(out["BTC"]["razon"].startswith("Consenso 3/4"))
+
+    def test_todas_tiene_tope_de_cinco(self):
+        ia.configurar([{"id": "groq", "url": "https://api.groq.com/openai/v1", "key": "gsk_x", "modelos": ["m%d" % i for i in range(8)]}], {"enabled": True, "size": 0})
+        self.assertEqual(ia.tamano_consenso(), 5)
+        p, llamadas = self.con({"m%d" % i: resp("BTC", "COMPRAR", 60) for i in range(8)})
+        with p:
+            out, _, _ = ia.opinar(PROP, {})
+        self.assertEqual(len(llamadas), 5)
+        self.assertTrue(out["BTC"]["razon"].startswith("Consenso 5/5"))
+
+    def test_pedir_mas_votos_que_modelos_usa_los_que_hay(self):
+        ia.configurar(LISTA[:2], {"enabled": True, "size": 5})
+        self.assertEqual(ia.tamano_consenso(), 3)
+
+
 class FormatosRaros(Base):
     def test_diccionario_por_activo_cuenta_como_voto(self):
         glm = json.dumps({"BTC": {"senal": "ESPERAR", "confianza": 70, "razon": "neutral"}})

@@ -31,7 +31,7 @@ const CONFIG_DEFECTO: Json = {
   pred_ia: 'proponer', pred_monto: 11, pred_max_total: 30, pred_ventaja: 8, pred_conf_min: 65, pred_max_ciclo: 1,
   pred_prob_min: 5, pred_prob_max: 95, pred_horas_min: 1, pred_categorias: ['cripto_hoy'], pred_vender_ia: true, pred_tomar_ganancia: 0,
   pred_auto_solo_corto: true, pred_corto_horas: 36, pred_pagar_con: '',
-  pred_supervisor: true, pred_monto_techo: 11, pred_max_total_techo: 30, pred_supervisor_log: [],
+  pred_supervisor: true, pred_feedback: true, pred_monto_techo: 11, pred_max_total_techo: 30, pred_supervisor_log: [],
   // Varias IAs votan cada decisión del ciclo (un modelo de cada proveedor primero).
   ia_consenso: { enabled: true, size: 3 },
 };
@@ -119,6 +119,8 @@ function validarConfig(actual: Json, cambios: Json): { config?: Json; error?: st
   }
   if (cambios.pred_vender_ia !== undefined) c.pred_vender_ia = Boolean(cambios.pred_vender_ia);
   if (cambios.pred_supervisor !== undefined) c.pred_supervisor = Boolean(cambios.pred_supervisor);
+  // Feedback en movimiento: los resultados recientes pueden pedir más confianza (nunca menos).
+  if (cambios.pred_feedback !== undefined) c.pred_feedback = Boolean(cambios.pred_feedback);
   // Moneda que se vende si falta USDC para pagar una predicción ('' = solo USDC).
   if (cambios.pred_pagar_con !== undefined) c.pred_pagar_con = cambios.pred_pagar_con ? limpiarSimbolo(cambios.pred_pagar_con) : '';
   if (cambios.pred_auto_solo_corto !== undefined) c.pred_auto_solo_corto = Boolean(cambios.pred_auto_solo_corto);
@@ -322,7 +324,7 @@ async function mezclarOrdenes(env: Env, ahora: number, r: Json): Promise<void> {
     if (!v.orden) continue;
     const previa = lista.find((x) => PENDIENTE(x) && x.origen === 'ia' && x.simbolo === v.orden!.simbolo && x.accion === v.orden!.accion);
     if (previa) continue;
-    const o: Json = { ...v.orden, id: n.id || nuevoId('ia'), ts: ahora, origen: 'ia', confianza: n.confianza, ia: n.ia || null,
+    const o: Json = { ...v.orden, id: n.id || nuevoId('ia'), ts: ahora, origen: 'ia', confianza: n.confianza, ia: n.ia || null, categoria: n.categoria ? String(n.categoria).slice(0, 24) : undefined,
       estado: ['propuesta', 'aprobada', 'ejecutada', 'error'].includes(n.estado) ? n.estado : 'propuesta',
       nota: n.nota || null, error: n.error || null, resultado: n.resultado || null,
       vence: Math.min(ahora + (config.orden_horas || 24) * 3600_000, Number(n.caduca) > ahora ? Number(n.caduca) : Infinity),
@@ -489,12 +491,14 @@ async function runnerReporte(env: Env, r: Json): Promise<Response> {
   const serie = r.ok ? `${r.exchange}|${r.modo}` : estado.serie;
   if (r.ok && estado.serie !== serie) historial = [];
   if (r.ok && typeof r.total === 'number') historial.push([ahora, r.total]);
-  const { radar, cartera_sim, costos, graficas, ...ultimo } = r;
+  const { radar, cartera_sim, costos, graficas, feedback, feedback_resumen, ...ultimo } = r;
   const nuevo: Json = {
     ciclo, actualizado: ahora, serie, ultimo: { ...ultimo, ts: ahora },
     historial: historial.slice(-500),
     runner: { costos: costos ?? estado.runner?.costos ?? {}, cartera_sim: cartera_sim ?? estado.runner?.cartera_sim ?? null,
-      super_ts: r.supervisor?.ts ?? estado.runner?.super_ts ?? null },
+      super_ts: r.supervisor?.ts ?? estado.runner?.super_ts ?? null,
+      // Registro de decisiones y resultados: lo arma el runner y vuelve a él en el próximo ciclo.
+      feedback: feedback ?? estado.runner?.feedback ?? null, feedback_resumen: feedback_resumen ?? estado.runner?.feedback_resumen ?? null },
     radar: Array.isArray(radar) && radar.length ? radar : estado.radar || [],
     radar_ts: Array.isArray(radar) && radar.length ? ahora : estado.radar_ts || null,
   };
@@ -801,8 +805,8 @@ async function iaProveedoresApi(env: Env, ruta: string, c: Json): Promise<Respon
   }
   if (ruta === '/api/ia/consenso') {
     const size = Math.round(Number(c.size));
-    if (c.size !== undefined && !(size >= 2 && size <= 5)) return json({ error: 'Pueden votar de 2 a 5 IAs' }, 400);
-    config.ia_consenso = { enabled: c.enabled !== undefined ? Boolean(c.enabled) : !!config.ia_consenso?.enabled, size: c.size !== undefined ? size : config.ia_consenso?.size || 3 };
+    if (c.size !== undefined && !(size === 0 || (size >= 2 && size <= 5))) return json({ error: 'Pueden votar de 2 a 5 IAs, o todas (0)' }, 400);
+    config.ia_consenso = { enabled: c.enabled !== undefined ? Boolean(c.enabled) : !!config.ia_consenso?.enabled, size: c.size !== undefined ? size : config.ia_consenso?.size ?? 3 };
     await env.KUMO.put('config', JSON.stringify(config));
     return respuesta({ ok: true });
   }
@@ -867,34 +871,36 @@ async function iaChat(env: Env, mensajes: Json[], solo?: { prov: Json; modelo: s
   throw new Error(u ? `${u.proveedor} ${u.error} con ${u.modelo}` : 'La IA no respondió');
 }
 
-// Consenso en la nube (igual que en el ciclo): hasta `size` IAs en paralelo, primero un
-// modelo de cada proveedor; si responde menos de la mitad, sigue una a una. Una respuesta
+// Consenso en la nube (igual que en el ciclo): `size` IAs en paralelo (0 = todos tus
+// modelos activos, hasta 5), primero un modelo de cada proveedor. Si alguna falla se
+// llama a las siguientes hasta juntar esos votos o quedarse sin modelos. Una respuesta
 // sin formato útil (`valido`) no cuenta y entra la siguiente.
 async function iaVarias(env: Env, config: Json, mensajes: Json[], valido: (d: Json) => boolean): Promise<{ votos: { datos: Json; modelo: string; proveedor: string }[]; errores: Json[] }> {
   const cands = await candidatosIA(env);
   if (!cands.length) throw new Error('Tu nube no tiene IA configurada: agrega un proveedor en Config → IA');
-  // Sin consenso (o con un solo proveedor) basta 1 respuesta válida: es la cadena de respaldo.
-  const solo = !config.ia_consenso?.enabled || new Set(cands.map((c) => c.prov.id)).size < 2;
-  const n = solo ? 1 : Math.max(2, Math.min(5, Number(config.ia_consenso?.size) || 3));
+  // Sin consenso (o con un solo modelo) basta 1 respuesta válida: es la cadena de respaldo.
+  const solo = !config.ia_consenso?.enabled || cands.length < 2;
+  const size = Number(config.ia_consenso?.size ?? 3);
+  const n = solo ? 1 : Math.min(cands.length, size === 0 ? 5 : Math.max(2, Math.min(5, size || 3)));
   const vistos = new Set<string>(), primero: typeof cands = [], resto: typeof cands = [];
   for (const c of cands) { (vistos.has(c.prov.id) ? resto : primero).push(c); vistos.add(c.prov.id); }
-  const cola = solo ? cands : [...primero, ...resto], votos: { datos: Json; modelo: string; proveedor: string }[] = [], errores: Json[] = [], caidos = new Set<string>();
-  const anotar = (c: { prov: Json; modelo: string }, r: { ok: boolean; datos?: Json; status?: number; error?: string }) => {
-    if (r.ok && valido(r.datos!)) votos.push({ datos: r.datos!, modelo: c.modelo, proveedor: c.prov.id });
-    else {
-      errores.push({ proveedor: c.prov.id, modelo: c.modelo, error: r.ok ? 'formato inválido (no se contó su voto)' : r.error });
-      if ((r.status === 401 || r.status === 403) && c.prov.key) caidos.add(c.prov.id);
-    }
-  };
-  const primeras = cola.slice(0, n), t0 = Date.now();
-  (await Promise.all(primeras.map((c) => preguntarIA(c.prov, c.modelo, mensajes, 45_000)))).forEach((r, i) => anotar(primeras[i], r));
-  // Tope de intentos extra: el plan gratis permite 50 subpeticiones por petición.
-  for (const c of cola.slice(n, solo ? undefined : n + 6)) {
-    if (votos.length * 2 >= n) break;
+  // Tope de llamadas: el plan gratis permite 50 subpeticiones por petición.
+  let cola = solo ? cands : [...primero, ...resto].slice(0, n + 6);
+  const votos: { datos: Json; modelo: string; proveedor: string }[] = [], errores: Json[] = [], caidos = new Set<string>(), t0 = Date.now();
+  while (cola.length && votos.length < n) {
     // Es un botón de la app: con un voto ya en mano no se hace esperar más de ~40 s.
     if (votos.length && Date.now() - t0 > 40_000) break;
-    if (caidos.has(c.prov.id)) continue;
-    anotar(c, await preguntarIA(c.prov, c.modelo, mensajes, 45_000));
+    const ronda = cola.slice(0, n - votos.length).filter((c) => !caidos.has(c.prov.id));
+    cola = cola.slice(n - votos.length);
+    const rs = await Promise.all(ronda.map((c) => preguntarIA(c.prov, c.modelo, mensajes, votos.length ? 25_000 : 45_000)));
+    rs.forEach((r, i) => {
+      const c = ronda[i];
+      if (r.ok && valido(r.datos!)) votos.push({ datos: r.datos!, modelo: c.modelo, proveedor: c.prov.id });
+      else {
+        errores.push({ proveedor: c.prov.id, modelo: c.modelo, error: r.ok ? 'formato inválido (no se contó su voto)' : r.error });
+        if ((r.status === 401 || r.status === 403) && c.prov.key) caidos.add(c.prov.id); // sin clave, el 401 es solo de ese modelo
+      }
+    });
   }
   if (!votos.length) {
     const u = errores.slice(0, 4).map((e) => `${e.proveedor} ${corto(e.modelo)}: ${e.error}`).join('; ');
@@ -906,12 +912,12 @@ const corto = (m: string) => String(m).split('/').pop()!.replace(':free', '');
 const mediana = (xs: number[]) => { const a = [...xs].sort((x, y) => x - y), k = a.length >> 1; return a.length % 2 ? a[k] : (a[k - 1] + a[k]) / 2; };
 // Etiqueta del modelo como en el ciclo: «consenso:a+b» o el modelo solo.
 const etiquetaVotos = (votos: { modelo: string }[]) => votos.length > 1 ? 'consenso:' + votos.map((v) => corto(v.modelo)).join('+') : votos[0].modelo;
-// Suma de confianza por opción (mínimo 0.01 por voto); empate → `espera`. Confianza final =
+// Cada IA es un voto: gana la opción con más votos; empate → `espera`. Confianza final =
 // media de quienes votaron la ganadora × (0.5 + 0.5 × acuerdo).
 function votarOpciones(votos: { modelo: string; opcion: string; confianza: number }[], espera: string): { opcion: string; confianza: number; a_favor: number } {
-  const suma: Record<string, number> = {};
-  for (const v of votos) suma[v.opcion] = (suma[v.opcion] || 0) + Math.max(0.01, v.confianza);
-  const mejor = Math.max(...Object.values(suma)), gan = Object.keys(suma).filter((k) => Math.abs(suma[k] - mejor) < 1e-9);
+  const cuenta: Record<string, number> = {};
+  for (const v of votos) cuenta[v.opcion] = (cuenta[v.opcion] || 0) + 1;
+  const mejor = Math.max(...Object.values(cuenta)), gan = Object.keys(cuenta).filter((k) => cuenta[k] === mejor);
   const opcion = gan.length === 1 ? gan[0] : espera, favor = votos.filter((v) => v.opcion === opcion);
   const media = favor.length ? favor.reduce((a, v) => a + v.confianza, 0) / favor.length : 0;
   return { opcion, confianza: Math.round(media * (0.5 + 0.5 * favor.length / votos.length)), a_favor: favor.length };
@@ -1076,18 +1082,27 @@ async function prediccionGrafica(url: URL): Promise<Response> {
       return { t: v.map((x) => Number(x.t)), c: v.map((x) => Number(x.c)) };
     } catch { return { t: [], c: [] }; }
   };
-  const [prob, h1, h4, d1] = await Promise.all([
+  const [prob, h1, h4, h2, h12, d1] = await Promise.all([
     velas(coin, '15m', 48),
     m.subyacente ? velas(m.subyacente, '1h', 100) : null,
     m.subyacente ? velas(m.subyacente, '4h', 400) : null,
+    m.subyacente ? velas(m.subyacente, '2h', 600) : null,
+    m.subyacente ? velas(m.subyacente, '12h', 1200) : null,
     m.subyacente ? velas(m.subyacente, '1d', 2400) : null,
   ]);
+  // Hyperliquid no da velas de 6 h: se arman con las de 2 h (cierre de cada bloque de 6 h UTC).
+  const h6 = { t: [] as number[], c: [] as number[] };
+  (h2?.t || []).forEach((t, i) => {
+    const b = Math.floor(t / 21_600_000) * 21_600_000;
+    if (h6.t[h6.t.length - 1] === b) h6.c[h6.c.length - 1] = h2!.c[i];
+    else { h6.t.push(b); h6.c.push(h2!.c[i]); }
+  });
   const datos: Json = { coin, mercado, lado, pregunta: m.pregunta, lado_nombre: ld.nombre, precio_lado: ld.precio ?? null, ventaja: ld.ventaja ?? null,
     prob_modelo: ld.prob_modelo ?? null, regla: m.regla, tipo: m.tipo, lineas: m.lineas || [], nombre_sub: m.nombre_sub,
     subyacente: m.subyacente, objetivo: m.objetivo, precio_actual: m.precio_actual ?? null, vence: m.vence, ts: ahora, prob,
     lados: m.lados, mov: m.mov || null, regimen: m.regimen || null, cambio_1h_pct: m.cambio_1h_pct ?? null, cambio_24h_pct: m.cambio_24h_pct ?? null, cambio_48h_pct: m.cambio_48h_pct ?? null,
     sigma_plazo_pct: m.sigma_plazo_pct ?? null,
-    marcos: m.subyacente ? { '1h': h1, '4h': h4, '1d': d1 } : null, global: todo.global || null };
+    marcos: m.subyacente ? { '1h': h1, '4h': h4, '6h': h6, '12h': h12, '1d': d1 } : null, global: todo.global || null };
   graficaPredMem.set(coin, { ts: ahora, datos });
   return json(datos);
 }
@@ -1575,7 +1590,7 @@ async function api(req: Request, env: Env, ruta: string, url: URL): Promise<Resp
     case 'GET /api/estado': {
       const [config, estado] = await Promise.all([leerConfig(env), leer<Json>(env, 'estado', {})]);
       const { runner, radar, ...resto } = estado;
-      return json({ version: env.KUMO_VERSION || '1.0.0', config, ...resto, costos: runner?.costos || {} });
+      return json({ version: env.KUMO_VERSION || '1.0.0', config, ...resto, costos: runner?.costos || {}, feedback: runner?.feedback_resumen || null });
     }
     case 'GET /api/ordenes':
       return json({ ordenes: await leerOrdenes(env), modo: (await leerConfig(env)).ordenes_ia });

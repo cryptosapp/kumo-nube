@@ -443,7 +443,9 @@ def opinar_predicciones(candidatos, posiciones, glob=None, noticias=None, feedba
               "probabilidad que da el mercado. «prob_modelo_pct» sale de un modelo log-normal con la volatilidad de 1 h, 24 h "
               "y 48 h por tramos (no es certeza); «mov_tipico_1h_24h_48h_pct» es cuánto se mueve el subyacente normalmente y "
               "«volatilidad» = turbulento si la última hora se mueve mucho más que lo normal. Sé escéptico: el modelo ignora "
-              "noticias y el mercado puede saber algo más.\n")
+              "noticias y el mercado puede saber algo más. REGLA: cuando el mercado da menos de 5 % a un lado, casi siempre ya está "
+              "prácticamente decidido; no propongas COMPRAR ni COMPRAR MÁS de ese lado salvo que el precio actual, las horas que quedan y "
+              "el movimiento típico lo justifiquen con números (una tendencia de 24 h no basta).\n")
     if glob and glob.get("resumen"):
         pedido += (f"Mercado global ahora: {glob['resumen']} Úsalo en tu decisión: con aversión al riesgo o turbulencia sé más "
                    "exigente con apuestas a que el precio suba o se mantenga quieto.\n")

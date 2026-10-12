@@ -1281,7 +1281,9 @@ async function prediccionAnalizar(env: Env, c: Json): Promise<Response> {
   const global = todo.global || null;
   // Datos frescos y públicos: probabilidad actual, precio del subyacente y sus últimas 24 h.
   try {
-    const [m1, m2] = await Promise.all([hlInfo({ type: 'allMids' }), hlInfo({ type: 'allMids', dex: 'xyz' }).catch(() => ({}))]);
+    let sinXyz = false;
+    const [m1, m2] = await Promise.all([hlInfo({ type: 'allMids' }), hlInfo({ type: 'allMids', dex: 'xyz' }).catch(() => { sinXyz = true; return {}; })]);
+    if (sinXyz && String(p.subyacente || '').startsWith('xyz:')) mercado.aviso = 'Hyperliquid no dio los precios de bolsa y materias (xyz)';
     const mids: Json = { ...m1, ...m2 }, cod = coin.slice(1);
     if (ambos) (mm?.lados || []).forEach((l: Json, i: number) => { if (mids[l.coin] != null) mercado.lados[i].precio = Number(mids[l.coin]); });
     else {
@@ -1310,14 +1312,30 @@ async function prediccionAnalizar(env: Env, c: Json): Promise<Response> {
     if (!ambos) mercado.precio_tu_lado = p.precio;
   }
   const nombres: string[] = ambos ? (mm?.lados || []).map((l: Json) => String(l.nombre)) : [];
+  const config = await leerConfig(env);
+  const espera = mercado.tiene_posicion ? 'MANTENER' : 'NO ENTRAR';
+  // Sin los datos clave no se le pregunta a la IA: opinaría a ciegas (así recomendó comprar
+  // un lado que el mercado ya daba por perdido). Se dice qué falta y no se sugiere comprar.
+  const faltan: string[] = [];
+  if (!mm) faltan.push('el mercado ya no está en la lista abierta (por vencer o cerrado): no tengo su regla ni el modelo');
+  const dePrecio = !!p.subyacente || ['precio', 'toque', 'rango'].includes(String(p.tipo || ''));
+  if (dePrecio && mercado.precio_actual == null) faltan.push(`el precio actual de ${p.subyacente || 'su subyacente'}${mercado.aviso ? ` (${mercado.aviso})` : ''}`);
+  if (mercado.horas_para_vencer == null) faltan.push('cuánto falta para vencer');
+  if (!ambos && mercado.precio_tu_lado == null) faltan.push('el precio de tu lado');
+  if (faltan.length) {
+    const datos: Json = { coin, modelo: null, mercado, sugerencia: espera, confianza: 0, prob_estimada: null, sin_datos: faltan,
+      freno: `No puedo analizar esta predicción: falta ${faltan.join('; ')}. Sin eso cualquier sugerencia sería a ciegas. No compres con esta información; prueba de nuevo en unos minutos.`,
+      analisis: '', riesgos: [], global: global ? { resumen: global.resumen, tono: global.tono, turbulencia: global.turbulencia } : null, ts: Date.now() };
+    if (ambos && mm) Object.assign(datos, { mercado_id: mm.mercado, lado_sugerido: null, lado_nombre: null });
+    await bitacora(env, [{ ts: Date.now(), tipo: 'ia', ok: false, texto: `IA (predicción ${p.pregunta}${ambos ? '' : ' · ' + p.lado_nombre}): no se consultó, falta ${faltan.join('; ')}` }]);
+    return json(datos);
+  }
   const pide = ambos
     ? `El usuario mira este mercado completo y quiere saber si comprar un lado. Sugiere UNA acción: COMPRAR con "lado" = ${nombres.map((n) => `"${n}"`).join(' o ')}, o NO ENTRAR (lado null).${mercado.ya_tienes ? ' Ya tiene posición en este mercado: tenlo en cuenta.' : ''}`
     : mercado.tiene_posicion ? 'Sugiere UNA acción: MANTENER (esperar al vencimiento), VENDER (cerrar ahora al precio del mercado) o COMPRAR MÁS.' : 'El usuario aún NO tiene posición en este lado: sugiere COMPRAR (entrar en este lado) o NO ENTRAR.';
   const t0 = Date.now();
-  const config = await leerConfig(env);
-  // Cada IA da su sugerencia; se vota como en el ciclo (suma de confianza, empate → no hacer nada).
+  // Cada IA da su sugerencia; se vota como en el ciclo (un modelo, un voto; empate → no hacer nada).
   const validas = ambos ? null : mercado.tiene_posicion ? ['MANTENER', 'VENDER', 'COMPRAR MÁS'] : ['COMPRAR', 'NO ENTRAR'];
-  const espera = mercado.tiene_posicion ? 'MANTENER' : 'NO ENTRAR';
   const leerSug = (d: Json): { opcion: string; lado: number | null } | null => {
     const s0 = String(d?.sugerencia || '').toUpperCase().trim().replace('COMPRAR MAS', 'COMPRAR MÁS');
     if (ambos) {
@@ -1331,7 +1349,8 @@ async function prediccionAnalizar(env: Env, c: Json): Promise<Response> {
       { role: 'system', content: 'Eres un analista prudente de mercados de predicción. Explicas a un principiante en español sencillo. No prometes resultados. Respondes SOLO JSON válido.' },
       { role: 'user', content: `Mercado de predicción de Hyperliquid (cada unidad paga 1 si acierta y 0 si no; el precio es la probabilidad que le da el mercado):\n${JSON.stringify(mercado)}\nMercado global ahora: ${global ? JSON.stringify({ resumen: global.resumen, tono: global.tono, turbulencia: global.turbulencia }) : 'sin datos'}\n` +
         `Lee la regla. Si depende de un precio, compara precio actual con objetivo, el tiempo que queda y cuánto se mueve: «movimiento_tipico_pct» es 1 desviación en 1 h, 24 h y 48 h; «movimiento_esperado_hasta_vencer_pct» es la que usa el modelo hasta el vencimiento; si el régimen es «turbulento», la última hora se mueve mucho más que lo normal. Ten en cuenta el mercado global (tono de riesgo, refugio, turbulencia) y la tendencia de 1 h / 24 h / 48 h. Si es un evento (economía, empresas), usa lo que sepas y di claramente si tu información puede estar desactualizada. Compara tu probabilidad con la del mercado. ${pide}\n` +
-        `Formato: {"sugerencia":"${ambos ? 'COMPRAR|NO ENTRAR' : 'MANTENER|VENDER|COMPRAR MÁS|COMPRAR|NO ENTRAR'}",${ambos ? '"lado":"' + (nombres[0] || 'Sí') + '",' : ''}"confianza":0-100,"prob_estimada":0-100,"analisis":"2-4 frases","riesgos":["..."]}${ambos ? ' (prob_estimada = probabilidad de que el lado sugerido acierte; si NO ENTRAR, la de «' + (nombres[0] || 'Sí') + '»)' : ''}` },
+        `Formato: {"sugerencia":"${ambos ? 'COMPRAR|NO ENTRAR' : 'MANTENER|VENDER|COMPRAR MÁS|COMPRAR|NO ENTRAR'}",${ambos ? '"lado":"' + (nombres[0] || 'Sí') + '",' : ''}"confianza":0-100,"prob_estimada":0-100,"analisis":"2-4 frases","riesgos":["..."]}${ambos ? ' (prob_estimada = probabilidad de que el lado sugerido acierte; si NO ENTRAR, la de «' + (nombres[0] || 'Sí') + '»)' : ' (prob_estimada = probabilidad de que «' + p.lado_nombre + '» acierte)'}\n` +
+        'REGLA: cuando el mercado da menos de 5 % a un lado, casi siempre es porque ya está prácticamente decidido (precio lejos del objetivo y poco tiempo). No sugieras comprar ni comprar más de ese lado salvo que el precio actual, el tiempo que queda y el movimiento típico lo justifiquen con números; una tendencia de 24 h no basta.' },
   ], (d) => leerSug(d) != null);
   const filas = votos.map((v) => ({ ...v, ...leerSug(v.datos)!, confianza: Math.max(0, Math.min(100, Number(v.datos.confianza) || 0)),
     prob: Number.isFinite(Number(v.datos.prob_estimada)) && v.datos.prob_estimada !== null && v.datos.prob_estimada !== '' ? Math.max(0, Math.min(100, Number(v.datos.prob_estimada))) : null }));
@@ -1343,20 +1362,36 @@ async function prediccionAnalizar(env: Env, c: Json): Promise<Response> {
   // Probabilidad: mediana de quienes votaron la opción ganadora (misma pregunta, mismo lado).
   const probs = favor.map((f) => f.prob).filter((x): x is number => x != null);
   const detalle = filas.length > 1 ? `Consenso ${r.a_favor}/${filas.length} (${filas.map((f) => `${corto(f.modelo)} ${f.opcion} ${f.confianza}`).join(', ')}). ` : '';
+  // Freno de coherencia: una sugerencia de COMPRAR tiene que resistir la comparación con el
+  // mercado y con el modelo estadístico. Si no, Kumo la cambia por no hacer nada y lo dice.
+  let freno: string | null = null;
+  const probIA = probs.length ? Math.round(mediana(probs) * 10) / 10 : null;
+  if (/^COMPRAR/.test(sug)) {
+    const li = ambos && ladoSug != null ? mercado.lados[ladoSug] : null;
+    const pr: number | null = ambos ? li?.precio ?? null : mercado.precio_tu_lado ?? null;
+    const pmod: number | null = ambos ? li?.prob_modelo_pct ?? null : mercado.prob_modelo_estadistico_tu_lado_pct ?? null;
+    const lmin = Number(config.pred_prob_min ?? 5), lmax = Number(config.pred_prob_max ?? 95), pct1 = (x: number) => String(Math.round(x * 10) / 10).replace('.', ',');
+    if (pr == null) freno = 'no hay precio de mercado de ese lado para comparar';
+    else if (pr * 100 < lmin || pr * 100 > lmax) freno = `el mercado le da ${pct1(pr * 100)} % a ese lado, fuera de tu rango de ${lmin}–${lmax} %. Con precios tan extremos casi siempre ya está decidido: lo barato no es una oportunidad`;
+    else if (pmod != null && pmod / 100 < pr + 0.02) freno = `el modelo estadístico le da ${pct1(pmod)} % y el mercado ${pct1(pr * 100)} %: a ese precio no hay ventaja`;
+    else if (probIA != null && probIA - pr * 100 > 40 && (pmod == null || pmod < probIA - 25)) freno = `la IA estima ${pct1(probIA)} % y el mercado ${pct1(pr * 100)} %: una diferencia así, sin que el modelo estadístico la respalde${pmod != null ? ` (${pct1(pmod)} %)` : ''}, suele ser un error de la IA y no una ganga`;
+  }
   const riesgos = [...new Set([lider, ...favor, ...filas].flatMap((f) => (Array.isArray(f.datos.riesgos) ? f.datos.riesgos : []).map((x: unknown) => String(x).slice(0, 160))))];
   const datos: Json = {
-    coin: ladoSug != null ? `+${mm!.mercado * 10 + ladoSug}` : coin, modelo, mercado, sugerencia: sug,
+    coin: ladoSug != null && !freno ? `+${mm!.mercado * 10 + ladoSug}` : coin, modelo, mercado, sugerencia: freno ? espera : sug,
     confianza: r.confianza,
-    prob_estimada: probs.length ? Math.round(mediana(probs) * 10) / 10 : null,
+    prob_estimada: probIA,
+    // Lo que dijo la IA antes del freno, para que se vea qué se corrigió y por qué.
+    freno: freno ? `Kumo frenó la sugerencia de la IA (${sug} · ${r.confianza} %): ${freno}.` : undefined, sugerencia_ia: freno ? sug : undefined,
     analisis: (detalle + String(d.analisis || '')).slice(0, 1000),
     riesgos: riesgos.slice(0, 4),
     votos: filas.length > 1 ? filas.map((f) => ({ modelo: corto(f.modelo), sugerencia: f.opcion, confianza: f.confianza, prob: f.prob })) : undefined,
     global: global ? { resumen: global.resumen, tono: global.tono, turbulencia: global.turbulencia } : null,
     ts: Date.now(),
   };
-  if (ambos) Object.assign(datos, { mercado_id: mm!.mercado, lado_sugerido: ladoSug, lado_nombre: ladoSug != null ? nombres[ladoSug] : null });
+  if (ambos) Object.assign(datos, { mercado_id: mm!.mercado, lado_sugerido: freno ? null : ladoSug, lado_nombre: ladoSug != null ? nombres[ladoSug] : null });
   prediccionMem.set(clave, { ts: Date.now(), datos });
-  await bitacora(env, [{ ts: Date.now(), tipo: 'ia', ok: true, modelo, ms: Date.now() - t0, texto: `IA (predicción ${p.pregunta}${ambos ? '' : ' · ' + p.lado_nombre}) sugirió ${datos.sugerencia} con ${modelo} en ${((Date.now() - t0) / 1000).toFixed(1)} s` }]);
+  await bitacora(env, [{ ts: Date.now(), tipo: 'ia', ok: true, modelo, ms: Date.now() - t0, texto: `IA (predicción ${p.pregunta}${ambos ? '' : ' · ' + p.lado_nombre}) sugirió ${sug} con ${modelo} en ${((Date.now() - t0) / 1000).toFixed(1)} s${freno ? ` · FRENADA: ${freno}` : ''}` }]);
   return json(datos);
 }
 
@@ -1474,6 +1509,8 @@ Formato: {"respuesta":"2-4 frases para el usuario","propuestas":[{"coin":"#90170
     let aviso = '';
     if (accion === 'COMPRAR' && ref) {
       const pm = ref.l.prob_modelo != null ? ref.l.prob_modelo / 100 : null;
+      const lmin = Number(config.pred_prob_min ?? 5) / 100, lmax = Number(config.pred_prob_max ?? 95) / 100;
+      if (px < lmin || px > lmax) { descartadas.push(`${etiqueta}: el vendedor más barato pide ${px}, fuera de tu rango de ${lmin * 100}–${lmax * 100} %: con precios tan extremos casi siempre ya está decidido`); continue; }
       if (pm != null && px >= pm - 0.02) { descartadas.push(`${etiqueta}: el vendedor más barato pide ${px} y el modelo le da ${ref.l.prob_modelo}%: a ese precio no hay ventaja`); continue; }
       if (ref.l.precio != null && px > ref.l.precio + 0.05) aviso = `Ojo: el precio medio es ${ref.l.precio} pero el vendedor más barato pide ${px} (libro con pocas ofertas).`;
     }

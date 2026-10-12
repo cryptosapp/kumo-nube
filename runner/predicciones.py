@@ -365,6 +365,13 @@ def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None, glob
         precio = ask or r["precio"]
         if not pmin <= precio <= pmax or (o.get("prob") is not None and o["prob"] / 100 < precio + 0.03):
             continue
+        # La IA no basta para comprar más: el modelo estadístico tiene que ver ventaja a ese
+        # precio. Sin modelo (mercado fuera de la lista) tampoco se compra.
+        pm = r.get("prob_modelo_pct")
+        if pm is None or pm / 100 < precio + 0.03:
+            notas.append(f"Predicciones: la IA quería comprar más de «{r['pregunta']} · {r['lado']}» a {precio:g}, pero "
+                         + ("no hay modelo estadístico de ese mercado para comprobarlo" if pm is None else f"el modelo le da {pm:g}%: no hay ventaja"))
+            continue
         maximo = min(tope - expuesto, libre)
         u = unidades_para(monto, precio, maximo) if maximo > 0 else None
         if u is None:

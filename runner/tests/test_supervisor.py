@@ -83,6 +83,31 @@ class ComprarMas(unittest.TestCase):
         débil = lambda c, p: ({"#90170": {"accion": "COMPRAR MÁS", "confianza": 50, "prob": 80, "razon": ""}}, "m", None)
         self.assertEqual(PR.proponer({**CFG}, lista(), pos, [], 50, débil)[0], [])
 
+    def test_no_compra_mas_si_el_modelo_no_ve_ventaja(self):
+        """El caso del oro (beta23): la IA dice 90 %, pero el modelo estadístico no lo respalda."""
+        import predicciones as PR
+        from tests.test_pred_ia import mercado
+        pos = [{"coin": "+90170", "valor": 4, "precio": 0.40, "cantidad": 10.0, "pregunta": "¿SOL ≥ 120?", "lado_nombre": "Sí"}]
+        op = lambda c, p: ({"#90170": {"accion": "COMPRAR MÁS", "confianza": 90, "prob": 90, "razon": "subirá"}}, "m", None)
+        libro = lambda cod, comprar: {"precio": 0.42, "unidades": 50}
+        nuevas, notas, _ = PR.proponer({**CFG}, [mercado(prob=41.0)], pos, [], 50, op, libro)
+        self.assertEqual(nuevas, [])
+        self.assertTrue(any("el modelo le da 41%: no hay ventaja" in n for n in notas), notas)
+
+    def test_no_compra_mas_si_el_mercado_ya_no_esta_en_la_lista(self):
+        import predicciones as PR
+        pos = [{"coin": "+77770", "valor": 4, "precio": 0.40, "cantidad": 10.0, "pregunta": "¿Oro ≥ 4 170?", "lado_nombre": "No"}]
+        op = lambda c, p: ({"#77770": {"accion": "COMPRAR MÁS", "confianza": 90, "prob": 90, "razon": "barato"}}, "m", None)
+        nuevas, notas, _ = PR.proponer({**CFG}, lista(), pos, [], 50, op, lambda cod, comprar: {"precio": 0.42, "unidades": 50})
+        self.assertEqual(nuevas, [])
+        self.assertTrue(any("no hay modelo estadístico" in n for n in notas), notas)
+
+    def test_no_compra_mas_un_lado_casi_perdido(self):
+        import predicciones as PR
+        pos = [{"coin": "+90170", "valor": 0.04, "precio": 0.004, "cantidad": 10.0, "pregunta": "¿SOL ≥ 120?", "lado_nombre": "Sí"}]
+        op = lambda c, p: ({"#90170": {"accion": "COMPRAR MÁS", "confianza": 70, "prob": 90, "razon": "subvalorado"}}, "m", None)
+        self.assertEqual(PR.proponer({**CFG}, lista(), pos, [], 50, op, lambda cod, comprar: {"precio": 0.004, "unidades": 5000})[0], [])
+
 
 if __name__ == "__main__":
     unittest.main()

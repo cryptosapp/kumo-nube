@@ -3,6 +3,8 @@
 // Las claves del exchange NUNCA llegan aquí: viven solo en los secretos de
 // GitHub del usuario y las usa el runner.
 
+import { WEB_HTML } from './web';
+
 export interface Env {
   KUMO: KVNamespace;
   APP_TOKEN: string;
@@ -53,6 +55,24 @@ const CORS = {
   'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
   'Access-Control-Allow-Headers': 'Authorization,Content-Type',
 };
+
+// Versión web de la app (la misma página de la APK), servida desde tu propia nube.
+// La página no trae ningún secreto: sin tu token de la app no muestra ni hace nada.
+const CAB_WEB = {
+  'Cache-Control': 'no-cache', 'X-Robots-Tag': 'noindex, nofollow', 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+};
+const ICONO_WEB = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108"><rect width="108" height="108" rx="22" fill="#0b0d14"/><path d="M34 72a15 15 0 0 1 2-30 20 20 0 0 1 38-4 17 17 0 0 1 1 34z" fill="#7dd3fc"/><text x="54" y="67" font-size="20" font-family="sans-serif" font-weight="700" text-anchor="middle" fill="#0b0d14">β</text></svg>';
+function web(req: Request, ruta: string): Response | null {
+  if (req.method !== 'GET') return null;
+  if (ruta === '/app' || (ruta === '/' && (req.headers.get('Accept') || '').includes('text/html')))
+    return new Response(WEB_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8', ...CAB_WEB } });
+  if (ruta === '/manifest.webmanifest')
+    return new Response(JSON.stringify({ name: 'Kumo β', short_name: 'Kumo β', start_url: '/app', scope: '/', display: 'standalone', background_color: '#0b0d14', theme_color: '#0b0d14',
+      icons: [{ src: '/icono.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' }] }), { headers: { 'Content-Type': 'application/manifest+json; charset=utf-8', ...CAB_WEB } });
+  if (ruta === '/icono.svg') return new Response(ICONO_WEB, { headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400', 'X-Content-Type-Options': 'nosniff' } });
+  return null;
+}
 
 function json(datos: unknown, status = 200): Response {
   return new Response(JSON.stringify(datos), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...CORS } });
@@ -1764,6 +1784,8 @@ export default {
     const url = new URL(req.url);
     const ruta = url.pathname.replace(/\/+$/, '') || '/';
     try {
+      const pagina = web(req, ruta);
+      if (pagina) return pagina;
       if (ruta === '/' || ruta === '/api/salud') {
         const estado = await leer<Json>(env, 'estado', {});
         return json({ ok: true, nombre: 'kumo-bot', version: env.KUMO_VERSION || '1.0.0', ciclo: estado.ciclo || 0, ultimo_ciclo: estado.actualizado || null });

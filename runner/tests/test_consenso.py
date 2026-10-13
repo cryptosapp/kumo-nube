@@ -149,6 +149,35 @@ class Mayoria(Base):
         self.assertEqual(len(llamadas), 5)
         self.assertTrue(out["BTC"]["razon"].startswith("Consenso 5/5"))
 
+    def test_solo_votan_los_modelos_marcados(self):
+        """Con modelos marcados, los de reserva no se llaman aunque pidas «todas»."""
+        ia.configurar([{"id": "groq", "url": "https://api.groq.com/openai/v1", "key": "gsk_x", "modelos": ["a", "b"], "reserva": ["lento"]},
+                       {"id": "kilo", "url": "https://api.kilo.ai/api/gateway", "key": "", "modelos": ["c"], "reserva": ["otro"]}], {"enabled": True, "size": 0})
+        self.assertEqual(ia.tamano_consenso(), 3)
+        p, llamadas = self.con({"a": resp("BTC", "COMPRAR", 70), "b": resp("BTC", "COMPRAR", 60), "c": resp("BTC", "ESPERAR", 60)})
+        with p:
+            out, _, _ = ia.opinar(PROP, {})
+        self.assertEqual(sorted(m for m, _ in llamadas), ["a", "b", "c"])
+        self.assertTrue(out["BTC"]["razon"].startswith("Consenso 2/3"))
+
+    def test_la_reserva_entra_si_un_marcado_falla(self):
+        ia.configurar([{"id": "groq", "url": "https://api.groq.com/openai/v1", "key": "gsk_x", "modelos": ["a", "b"], "reserva": ["lento"]},
+                       {"id": "kilo", "url": "https://api.kilo.ai/api/gateway", "key": "", "modelos": [], "reserva": ["otro"]}], {"enabled": True, "size": 3})
+        self.assertEqual(ia.tamano_consenso(), 2)
+        p, llamadas = self.con({"a": resp("BTC", "COMPRAR", 70), "b": err(429), "lento": resp("BTC", "COMPRAR", 60)})
+        with p:
+            out, _, _ = ia.opinar(PROP, {})
+        self.assertEqual([m for m, _ in llamadas], ["a", "b", "lento"])
+        self.assertTrue(out["BTC"]["razon"].startswith("Consenso 2/2"))
+
+    def test_un_solo_marcado_responde_solo_y_la_reserva_lo_cubre(self):
+        ia.configurar([{"id": "groq", "url": "https://api.groq.com/openai/v1", "key": "gsk_x", "modelos": ["a"], "reserva": ["b"]}], {"enabled": True, "size": 3})
+        p, llamadas = self.con({"a": err(429), "b": resp("BTC", "COMPRAR", 60)})
+        with p:
+            out, modelo, _ = ia.opinar(PROP, {})
+        self.assertEqual([m for m, _ in llamadas], ["a", "b"])
+        self.assertEqual(modelo, "b")
+
     def test_pedir_mas_votos_que_modelos_usa_los_que_hay(self):
         ia.configurar(LISTA[:2], {"enabled": True, "size": 5})
         self.assertEqual(ia.tamano_consenso(), 3)

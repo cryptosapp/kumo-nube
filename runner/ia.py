@@ -41,7 +41,8 @@ TIMEOUT = 45
 # Modelo que respondió en la última prueba de la app (Config → semáforo): se prueba
 # primero dentro de su proveedor.
 PREFERIDO = None
-# Lista de proveedores que manda la nube: [{id, url, key, modelos}] (None = nube vieja).
+# Lista de proveedores que manda la nube: [{id, url, key, modelos, reserva}] (None = nube vieja).
+# `modelos` = los que marcaste para trabajar; `reserva` = los demás, solo si uno marcado falla.
 PROVEEDORES = None
 # Consenso: {"enabled": bool, "size": 2-5, o 0 = todos los modelos activos (hasta 5)}.
 CONSENSO = {"enabled": False, "size": 3}
@@ -50,7 +51,7 @@ CONSENSO = {"enabled": False, "size": 3}
 def configurar(lista=None, consenso=None):
     """La nube manda en cada ciclo la lista de proveedores (ya descifrada) y el consenso."""
     global PROVEEDORES, CONSENSO
-    PROVEEDORES = [p for p in (lista or []) if p.get("url") and p.get("modelos")] or None
+    PROVEEDORES = [p for p in (lista or []) if p.get("url") and (p.get("modelos") or p.get("reserva"))] or None
     c = consenso or {}
     size = c.get("size")
     # size 0 = «todas»: votan todos tus modelos activos (hasta 5).
@@ -86,7 +87,8 @@ def proveedor():
 def proveedores():
     """[{id, url, key, modelos, nombre}] en orden de prioridad."""
     if PROVEEDORES:
-        return [{**p, "url": p["url"].rstrip("/"), "modelos": _ordenar(list(p["modelos"])), "nombre": p.get("id") or _id_de_url(p["url"])}
+        return [{**p, "url": p["url"].rstrip("/"), "modelos": _ordenar(list(p.get("modelos") or [])),
+                 "reserva": _ordenar(list(p.get("reserva") or [])), "nombre": p.get("id") or _id_de_url(p["url"])}
                 for p in PROVEEDORES]
     prov = proveedor()
     if not prov:
@@ -197,8 +199,14 @@ def preguntar(prov, modelo, mensajes):
 
 
 def _candidatos():
-    """[(prov, modelo)] en orden de prioridad."""
-    return [(p, m) for p in proveedores() for m in p["modelos"]]
+    """[(prov, modelo)] en orden de prioridad: primero los modelos marcados y al final
+    los de reserva."""
+    provs = proveedores()
+    return _marcados(provs) + [(p, m) for p in provs for m in p.get("reserva") or []]
+
+
+def _marcados(provs=None):
+    return [(p, m) for p in (proveedores() if provs is None else provs) for m in p["modelos"]]
 
 
 def chat_json(mensajes):
@@ -230,17 +238,18 @@ ULTIMO_RESPALDO = []
 def elegir_votantes(n):
     """Un modelo de cada proveedor distinto primero (votos independientes y cuotas
     separadas) y luego el resto, todo en orden de prioridad."""
+    provs = proveedores()
     primero, resto, vistos = [], [], set()
-    for prov, modelo in _candidatos():
+    for prov, modelo in _marcados(provs):
         (resto if prov["nombre"] in vistos else primero).append((prov, modelo))
         vistos.add(prov["nombre"])
-    return primero + resto
+    return primero + resto + [(p, m) for p in provs for m in p.get("reserva") or []]
 
 
 def tamano_consenso():
     """Cuántas IAs votan: las que elegiste (2–5) o, con «todas» (size 0), todos tus
     modelos activos hasta 5."""
-    total = len(_candidatos())
+    total = len(_marcados()) or len(_candidatos())  # votan los marcados; la reserva solo cubre fallos
     return min(5, total) if not CONSENSO["size"] else min(CONSENSO["size"], total)
 
 
@@ -316,7 +325,7 @@ def decidir(mensajes, leer, espera):
     `leer(datos)` → {clave: opinión}; `espera(clave)` = acción si hay empate.
     Devuelve ({clave: opinión}, modelo, error)."""
     n = tamano_consenso()
-    if not CONSENSO["enabled"] or len(_candidatos()) < 2:
+    if not CONSENSO["enabled"] or tamano_consenso() < 2:
         datos, modelo, error = chat_json(mensajes)
         return (leer(datos), modelo, None) if datos is not None else ({}, None, error)
     ok, errores = consultar_varias(mensajes, n, lambda d: bool(leer(d)))
@@ -338,7 +347,7 @@ def decidir(mensajes, leer, espera):
 def varias_json(mensajes, valido=lambda d: True):
     """Como `decidir`, pero devuelve las respuestas crudas para que quien llama las combine:
     ([(modelo, datos)], error). Con consenso apagado o una sola IA, una respuesta (cadena)."""
-    if not CONSENSO["enabled"] or len(_candidatos()) < 2:
+    if not CONSENSO["enabled"] or tamano_consenso() < 2:
         datos, modelo, error = chat_json(mensajes)
         if datos is None:
             return [], error

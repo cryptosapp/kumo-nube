@@ -560,7 +560,7 @@ async function runnerConfig(env: Env): Promise<Response> {
   // así no hace falta copiarlas a los secretos de GitHub.
   const { lista: ia_proveedores } = await proveedoresIA(env);
   return json({ config, estado_runner: estado.runner || {}, ordenes, ia_pref, ordenes_pred,
-    ia_proveedores: ia_proveedores.map((p) => ({ id: p.id, url: p.url, key: p.key, modelos: p.modelos })), ia_consenso: config.ia_consenso });
+    ia_proveedores: ia_proveedores.map((p) => ({ id: p.id, url: p.url, key: p.key, modelos: p.elegidos, reserva: p.reserva })), ia_consenso: config.ia_consenso });
 }
 
 // ---------------------------------------------------------------- Proveedores de IA
@@ -597,7 +597,8 @@ async function llaveIA(env: Env): Promise<CryptoKey> {
   const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('kumo:ia-keys:' + env.APP_TOKEN));
   return crypto.subtle.importKey('raw', h, 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
-type DocIA = { lista: Json[]; quitados: string[]; orden?: string[] };
+// `elegidos` = los modelos que marcaste para trabajar («proveedor|modelo»); sin marcar ninguno, todos.
+type DocIA = { lista: Json[]; quitados: string[]; orden?: string[]; elegidos?: string[] };
 async function leerDocIA(env: Env): Promise<{ doc: DocIA; ilegible: boolean; migrar: boolean }> {
   const crudo = await env.KUMO.get('ia_proveedores');
   const vacio: DocIA = { lista: [], quitados: [] };
@@ -605,11 +606,11 @@ async function leerDocIA(env: Env): Promise<{ doc: DocIA; ilegible: boolean; mig
   let x: Json;
   try { x = JSON.parse(crudo); } catch { return { doc: vacio, ilegible: true, migrar: false }; }
   if (Array.isArray(x)) return { doc: { lista: x, quitados: [] }, ilegible: false, migrar: true }; // lista vieja en texto plano
-  if (!x.iv || !x.data) return { doc: { lista: x.lista || [], quitados: x.quitados || [], orden: x.orden }, ilegible: false, migrar: true };
+  if (!x.iv || !x.data) return { doc: { lista: x.lista || [], quitados: x.quitados || [], orden: x.orden, elegidos: x.elegidos }, ilegible: false, migrar: true };
   try {
     const plano = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: deB64(x.iv) }, await llaveIA(env), deB64(x.data));
     const d = JSON.parse(new TextDecoder().decode(plano));
-    return { doc: { lista: d.lista || [], quitados: d.quitados || [], orden: d.orden }, ilegible: false, migrar: false };
+    return { doc: { lista: d.lista || [], quitados: d.quitados || [], orden: d.orden, elegidos: d.elegidos }, ilegible: false, migrar: false };
   } catch {
     return { doc: vacio, ilegible: true, migrar: false }; // cambió el token de la app
   }
@@ -637,6 +638,15 @@ function listaEfectiva(env: Env, doc: DocIA): Json[] {
     const pos = (id: string) => { const i = doc.orden!.indexOf(id); return i < 0 ? 1e6 : i; };
     out.sort((a, b) => pos(a.id) - pos(b.id) || 0);
   }
+  // Fuera los que no son de chat (voz, imagen…) aunque hayan quedado guardados de antes.
+  for (const p of out) { const l = p.modelos.filter((m: string) => !NO_CHAT.test(m)); if (l.length) p.modelos = l; }
+  // Los modelos que marcaste trabajan; los demás quedan de reserva (solo entran si uno marcado falla).
+  const marcados = new Set(doc.elegidos || []);
+  const hay = out.some((p) => p.modelos.some((m: string) => marcados.has(`${p.id}|${m}`)));
+  for (const p of out) {
+    p.elegidos = hay ? p.modelos.filter((m: string) => marcados.has(`${p.id}|${m}`)) : p.modelos;
+    p.reserva = p.modelos.filter((m: string) => !p.elegidos.includes(m));
+  }
   return out;
 }
 async function proveedoresIA(env: Env): Promise<{ lista: Json[]; ilegible: boolean }> {
@@ -644,13 +654,15 @@ async function proveedoresIA(env: Env): Promise<{ lista: Json[]; ilegible: boole
   if (migrar) await guardarDocIA(env, doc); // migra la lista vieja a cifrada
   return { lista: listaEfectiva(env, doc), ilegible };
 }
-async function candidatosIA(env: Env): Promise<{ prov: Json; modelo: string }[]> {
+// Primero los modelos marcados (en orden de prioridad) y al final los de reserva.
+async function candidatosIA(env: Env): Promise<{ prov: Json; modelo: string; reserva?: boolean }[]> {
   const { lista } = await proveedoresIA(env);
   const pref = await env.KUMO.get('ia_pref');
-  return lista.flatMap((p) => {
-    const ms: string[] = pref && p.modelos.includes(pref) ? [pref, ...p.modelos.filter((m: string) => m !== pref)] : p.modelos;
-    return ms.map((modelo) => ({ prov: p, modelo }));
-  });
+  const orden = (ms: string[]) => (pref && ms.includes(pref) ? [pref, ...ms.filter((m) => m !== pref)] : ms);
+  return [
+    ...lista.flatMap((p) => orden(p.elegidos).map((modelo) => ({ prov: p, modelo }))),
+    ...lista.flatMap((p) => orden(p.reserva).map((modelo) => ({ prov: p, modelo, reserva: true }))),
+  ];
 }
 
 // Una pregunta a un proveedor, con lo suyo de cada uno.
@@ -696,7 +708,7 @@ async function preguntarIA(prov: Json, modelo: string, mensajes: Json[], ms: num
 
 // Elige hasta 3 modelos de lo que la cuenta tiene: fuera los que no sirven para
 // chat y primero los grandes conocidos. Así no hay nombres fijos que caduquen.
-const NO_CHAT = /guard|safety|whisper|tts|audio|embed|image|code|omni|moderation|vision|ocr|rerank|transcri/i;
+const NO_CHAT = /guard|safety|whisper|tts|audio|embed|image|code|omni|moderation|vision|ocr|rerank|transcri|orpheus|canopylabs|playai|speech|voice|lyria|veo-|imagen/i;
 function elegirModelos(id: string, ids: string[]): string[] {
   let l = [...new Set(ids.map((x) => String(x).replace(/^models\//, '')))].filter((x) => !NO_CHAT.test(x));
   if (id === 'openrouter') l = l.filter((x) => x.endsWith(':free'));
@@ -743,11 +755,12 @@ async function iaProveedoresApi(env: Env, ruta: string, c: Json): Promise<Respon
   if (migrar) await guardarDocIA(env, doc);
   const vista = (lista: Json[]) => lista.map((p, i) => ({
     id: p.id, nombre: p.id === 'instalacion' ? `Clave de la instalación${p.de ? ` (${catIA(p.de)?.nombre || p.de})` : ''}` : catIA(p.id)?.nombre || p.id,
-    clave: recortar(p.key), modelos: p.modelos, origen: p.origen, rol: i === 0 ? 'PRINCIPAL' : 'RESPALDO', actualizada: p.updated_at || null,
+    clave: recortar(p.key), modelos: p.modelos, elegidos: p.elegidos, origen: p.origen, rol: i === 0 ? 'PRINCIPAL' : 'RESPALDO', actualizada: p.updated_at || null,
   }));
   const respuesta = (extra: Json = {}) => json({
     catalogo: IA_CATALOGO.map(({ prefijos, ...x }) => ({ ...x, prefijos })), activa: vista(listaEfectiva(env, doc)),
-    cifrada: true, ilegible, quitados: doc.quitados, consenso: config.ia_consenso, ...extra,
+    cifrada: true, ilegible, quitados: doc.quitados, consenso: config.ia_consenso,
+    seleccion: listaEfectiva(env, doc).some((p) => p.reserva.length > 0), ...extra,
   });
   if (ruta === '/api/ia/proveedores' && c._get) return respuesta();
   if (!c.confirmed) return json({ error: 'Falta confirmar el cambio' }, 400);
@@ -772,6 +785,8 @@ async function iaProveedoresApi(env: Env, ruta: string, c: Json): Promise<Respon
         doc.orden = ord;
       }
     }
+    // Si ya elegiste con cuáles trabajar, los de un proveedor nuevo entran marcados.
+    if (doc.elegidos?.length) doc.elegidos = [...new Set([...doc.elegidos.filter((x) => !x.startsWith(`${id}|`)), ...v.modelos!.map((m) => `${id}|${m}`)])];
     await guardarDocIA(env, doc);
     await bitacora(env, [{ ts: ahora, tipo: 'ia', ok: true, texto: `IA: ${cat.nombre} ${cat.sinClave ? 'activada' : `guardada (${recortar(clave)})`} con ${v.modelos!.join(', ')}` }]);
     return respuesta({ ok: true, guardado: { id, modelos: v.modelos } });
@@ -802,6 +817,16 @@ async function iaProveedoresApi(env: Env, ruta: string, c: Json): Promise<Respon
       return { id: p.id, modelo: m, ok: r.ok, ms: Date.now() - t0, error: r.ok ? null : r.error };
     }));
     return respuesta({ pruebas: res });
+  }
+  if (ruta === '/api/ia/proveedores/modelos') {
+    // Con qué modelos trabajar: [«proveedor|modelo»]. `todos` = volver a usar todos.
+    const validos = new Set(listaEfectiva(env, doc).flatMap((p) => p.modelos.map((m: string) => `${p.id}|${m}`)));
+    const pedidos = c.todos ? [] : [...new Set((Array.isArray(c.elegidos) ? c.elegidos : []).map(String))].filter((x) => validos.has(x)).slice(0, 30);
+    if (!c.todos && !pedidos.length) return json({ error: 'Marca al menos un modelo: sin ninguno la IA quedaría apagada' }, 400);
+    doc.elegidos = pedidos.length === validos.size ? [] : pedidos;
+    await guardarDocIA(env, doc);
+    await bitacora(env, [{ ts: Date.now(), tipo: 'ia', ok: true, texto: doc.elegidos.length ? `IA: trabajas con ${doc.elegidos.map((x) => corto(x.split('|')[1])).join(', ')} (los demás quedan de reserva)` : 'IA: trabajas con todos tus modelos' }]);
+    return respuesta({ ok: true });
   }
   if (ruta === '/api/ia/consenso') {
     const size = Math.round(Number(c.size));
@@ -879,13 +904,15 @@ async function iaVarias(env: Env, config: Json, mensajes: Json[], valido: (d: Js
   const cands = await candidatosIA(env);
   if (!cands.length) throw new Error('Tu nube no tiene IA configurada: agrega un proveedor en Config → IA');
   // Sin consenso (o con un solo modelo) basta 1 respuesta válida: es la cadena de respaldo.
-  const solo = !config.ia_consenso?.enabled || cands.length < 2;
+  // Votan los modelos marcados (los de reserva solo entran si uno marcado falla).
+  const marcados = cands.filter((c) => !c.reserva).length || cands.length;
+  const solo = !config.ia_consenso?.enabled || marcados < 2;
   const size = Number(config.ia_consenso?.size ?? 3);
-  const n = solo ? 1 : Math.min(cands.length, size === 0 ? 5 : Math.max(2, Math.min(5, size || 3)));
-  const vistos = new Set<string>(), primero: typeof cands = [], resto: typeof cands = [];
-  for (const c of cands) { (vistos.has(c.prov.id) ? resto : primero).push(c); vistos.add(c.prov.id); }
+  const n = solo ? 1 : Math.min(marcados, size === 0 ? 5 : Math.max(2, Math.min(5, size || 3)));
+  const vistos = new Set<string>(), primero: typeof cands = [], resto: typeof cands = [], reserva: typeof cands = [];
+  for (const c of cands) { if (c.reserva) { reserva.push(c); continue; } (vistos.has(c.prov.id) ? resto : primero).push(c); vistos.add(c.prov.id); }
   // Tope de llamadas: el plan gratis permite 50 subpeticiones por petición.
-  let cola = solo ? cands : [...primero, ...resto].slice(0, n + 6);
+  let cola = solo ? cands : [...primero, ...resto, ...reserva].slice(0, n + 6);
   const votos: { datos: Json; modelo: string; proveedor: string }[] = [], errores: Json[] = [], caidos = new Set<string>(), t0 = Date.now();
   while (cola.length && votos.length < n) {
     // Es un botón de la app: con un voto ya en mano no se hace esperar más de ~40 s.
@@ -1657,6 +1684,7 @@ async function api(req: Request, env: Env, ruta: string, url: URL): Promise<Resp
     case 'POST /api/ia/proveedores':
     case 'POST /api/ia/proveedores/orden':
     case 'POST /api/ia/proveedores/probar':
+    case 'POST /api/ia/proveedores/modelos':
     case 'POST /api/ia/consenso':
       return iaProveedoresApi(env, ruta, cuerpo);
     case 'POST /api/ia/probar':

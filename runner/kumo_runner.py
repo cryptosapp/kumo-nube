@@ -278,6 +278,26 @@ def ciclo(remoto, parcial=None):
             return []
     preds = describir_preds()
 
+    # 2b) Protección por giro (si la activaste): regla fija, sin IA, antes que la IA opine.
+    giros_hechos = {str(k): v for k, v in ((estado.get("giros") or {}).items()) if v > time.time() * 1000 - 14 * 86_400_000}
+    if (not simulado and exchange_id == "hyperliquid" and hasattr(base, "_info_hl") and preds and not cfg["pausado"]
+            and cfg.get("pred_giro") in ("vender", "girar")):
+        try:
+            planes, notas_g = PR.giros(cfg, mercados_pred() or [], preds, {int(k) for k in giros_hechos}, pendientes)
+            notas += notas_g
+            if planes:
+                ordenes_g, ops_g = ejecutar_giros(base, ex, cfg, planes, preds, notas, mercados_pred())
+                nuevas += ordenes_g
+                ejecutadas += ops_g
+                for g in planes:
+                    if any(o.get("giro") == g["mercado"] and o.get("estado") == "ejecutada" for o in ordenes_g):
+                        giros_hechos[str(g["mercado"])] = int(time.time() * 1000)
+                if ops_g:
+                    saldos = ex.saldos()
+                    preds = describir_preds()
+        except Exception as e:  # nunca debe tumbar el ciclo
+            notas.append(f"Giro: {type(e).__name__}")
+
     # 3) Beta: la IA revisa los mercados de predicción y tus posiciones en cada ciclo
     #    y propone órdenes (o las ejecuta si activaste «IA ejecuta sola»).
     pred_ia, revision = None, None
@@ -294,7 +314,8 @@ def ciclo(remoto, parcial=None):
                 libre_p += saldos[pagar] * ((ex.precios([pagar]).get(pagar) or {}).get("precio") or 0) * 0.97
             except ErrorExchange:
                 pass
-        nuevas_p, pred_ia = predicciones_ia(base, ex, cfg, preds, pendientes, libre_p, notas, mercados_pred, cache_pred, titulares, fb_antes)
+        nuevas_p, pred_ia = predicciones_ia(base, ex, cfg, preds, pendientes, libre_p, notas, mercados_pred, cache_pred, titulares, fb_antes,
+                                            {int(k) for k in giros_hechos})
         for o in nuevas_p:
             if cfg.get("pred_ia") == "auto" and not cfg["pausado"]:
                 # «Solo corto plazo»: lo que vence más lejos queda como propuesta para que tú decidas.
@@ -377,7 +398,7 @@ def ciclo(remoto, parcial=None):
         "predicciones": preds, "valor_predicciones": valor_preds, "pred_ia": pred_ia,
         "supervisor": revision,
         # Registro de decisiones y resultados (la nube lo guarda y lo devuelve en el próximo ciclo).
-        "feedback": fb_registro, "feedback_resumen": fb_resumen,
+        "feedback": fb_registro, "feedback_resumen": fb_resumen, "giros": giros_hechos,
         # Ventas que el candado frenó (P/L < +0.5 % o costo desconocido): se ven en la bitácora.
         "bloqueos_perdida": O.BLOQUEOS[-10:],
         "ia_consenso": {**ia.CONSENSO, "proveedores": [p["nombre"] for p in ia.proveedores()]},
@@ -400,7 +421,74 @@ def precio_al_vencer(base, subyacente, ms):
     return float(antes[-1]["c"]) if antes else None
 
 
-def predicciones_ia(base, ex, cfg, preds, pendientes, libre, notas, mercados_pred=None, cache=None, titulares=None, fb=None):
+def ejecutar_giros(base, ex, cfg, planes, preds, notas, mercados=None):
+    """Vende tu lado al mejor comprador (aunque sea con pérdida: es lo que activaste) y,
+    con «girar», compra el otro lado con lo cobrado si el modelo le ve ventaja y cabe
+    en tu tope. Devuelve (órdenes, operaciones) para reportarlas a la nube."""
+    ordenes, ops = [], []
+    tope = float(cfg.get("pred_max_total") or 30)
+    pmax = float(cfg.get("pred_prob_max") or 95) / 100
+    for i, g in enumerate(planes):
+        ts = int(time.time())
+        mejor = base.mejor_precio_prediccion(int(g["coin"][1:]), False)
+        if not mejor or not mejor.get("precio"):
+            notas.append(f"Giro: quería vender «{g['etiqueta']}» pero no hay compradores ahora")
+            continue
+        if mejor["precio"] < 0.01:
+            notas.append(f"Giro: «{g['etiqueta']}» ya casi no vale nada (pagan {mejor['precio']:g}): vender no recupera nada, no la toco")
+            continue
+        venta = {"id": f"giro{ts}{i}v", "tipo": "prediccion", "coin": g["coin"], "accion": "VENDER", "unidades": g["unidades"],
+                 "limite": float(f"{mejor['precio']:.5g}"), "etiqueta": g["etiqueta"], "razon": g["razon"], "confianza": 100,
+                 "origen": "ia", "regla": True, "giro": g["mercado"], "permitir_perdida": True, "estado": "aprobada", "horas": g.get("horas")}
+        upd, op = O.ejecutar_prediccion(ex, venta, False, cfg, mercados)
+        venta.update({k: v for k, v in upd.items() if k != "id"})
+        ordenes.append(venta)
+        if not op:
+            notas.append(f"Giro: no pude vender «{g['etiqueta']}»: {upd.get('error')}")
+            continue
+        op["pnl"] = round((op["precio"] / g["costo"] - 1) * 100, 2) if g.get("costo") else None
+        ops.append(op)
+        notas.append(f"🔄 Giro: vendí {op['cantidad']:g} de «{g['etiqueta']}» a {op['precio']:g} (pagaste {g['costo']:g}): recuperé {op['total']:.2f} USDC")
+        otro = g.get("otro")
+        if not otro or not otro.get("coin"):
+            continue
+        cobrado = float(op["total"])
+        mejor = base.mejor_precio_prediccion(int(str(otro["coin"]).lstrip("#")), True)
+        ask = mejor and mejor.get("precio")
+        pm = otro.get("prob_modelo")
+        if not ask:
+            notas.append(f"Giro: no compré «{otro['etiqueta']}»: no hay vendedores")
+            continue
+        if ask > pmax:
+            notas.append(f"Giro: no compré «{otro['etiqueta']}»: cuesta {ask:g}, más que tu máximo de {pmax * 100:g}%")
+            continue
+        if pm is None or pm / 100 < ask + PR.GIRO_VENTAJA_OTRO:
+            notas.append(f"Giro: no compré «{otro['etiqueta']}» a {ask:g}: el modelo le da {pm if pm is not None else '?'}%, sin ventaja suficiente. Solo vendí.")
+            continue
+        try:
+            libre = ex.saldos().get("USDC", 0.0)
+        except ErrorExchange:
+            libre = cobrado
+        expuesto = sum(p.get("valor") or 0 for p in preds if p.get("coin") != "+" + g["coin"][1:])
+        u = PR.unidades_para(cobrado, ask, min(cobrado, libre, tope - expuesto))  # solo lo cobrado: el giro no pone dinero nuevo
+        if u is None:
+            notas.append(f"Giro: no compré «{otro['etiqueta']}»: no alcanza para el mínimo o pasaría tu tope de {tope:g} USDC")
+            continue
+        compra = {"id": f"giro{ts}{i}c", "tipo": "prediccion", "coin": otro["coin"], "accion": "COMPRAR", "unidades": u, "limite": float(f"{ask:.5g}"),
+                  "etiqueta": otro["etiqueta"], "razon": f"Giro: compro el otro lado con lo cobrado ({cobrado:.2f} USDC); el modelo le da {pm:g}% y cuesta {ask:g}.",
+                  "confianza": 100, "origen": "ia", "regla": True, "giro": g["mercado"], "estado": "aprobada", "horas": g.get("horas")}
+        upd, op2 = O.ejecutar_prediccion(ex, {**compra, "origen": "regla"}, False, cfg, mercados)
+        compra.update({k: v for k, v in upd.items() if k != "id"})
+        ordenes.append(compra)
+        if op2:
+            ops.append(op2)
+            notas.append(f"🔄 Giro: compré {op2['cantidad']:g} de «{otro['etiqueta']}» a {op2['precio']:g}")
+        else:
+            notas.append(f"Giro: no pude comprar «{otro['etiqueta']}»: {upd.get('error')}")
+    return ordenes, ops
+
+
+def predicciones_ia(base, ex, cfg, preds, pendientes, libre, notas, mercados_pred=None, cache=None, titulares=None, fb=None, excluir=None):
     """Pide a la IA sus órdenes de predicción. Los mercados (con el modelo) vienen de
     la nube; cada orden lleva como límite el mejor precio REAL del libro (no el
     precio medio, que casi nunca se llena). Devuelve (órdenes, resumen)."""
@@ -414,7 +502,7 @@ def predicciones_ia(base, ex, cfg, preds, pendientes, libre, notas, mercados_pre
             datos = http("GET", url_nube() + "/runner/predicciones", os.getenv("KUMO_RUNNER_TOKEN", ""))
             lista, glob = datos.get("mercados") or [], datos.get("global")
         nuevas, notas_p, resumen = PR.proponer(cfg, lista, preds, pendientes, libre, lambda c, p: ia.opinar_predicciones(c, p, glob, titulares, FB.para_ia(fb)),
-                                               base.mejor_precio_prediccion, glob, fb)
+                                               base.mejor_precio_prediccion, glob, fb, excluir)
     except Exception as e:  # nunca debe tumbar el ciclo
         notas.append(f"IA predicciones: {type(e).__name__}")
         return [], None

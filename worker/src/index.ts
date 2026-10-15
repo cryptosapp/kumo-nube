@@ -32,7 +32,7 @@ const CONFIG_DEFECTO: Json = {
   // Beta: la IA revisa los mercados de predicción en cada ciclo.
   pred_ia: 'proponer', pred_monto: 11, pred_max_total: 30, pred_ventaja: 8, pred_conf_min: 65, pred_max_ciclo: 1,
   pred_prob_min: 5, pred_prob_max: 95, pred_horas_min: 1, pred_categorias: ['cripto_hoy'], pred_vender_ia: true, pred_tomar_ganancia: 0,
-  pred_auto_solo_corto: true, pred_corto_horas: 36, pred_pagar_con: '',
+  pred_auto_solo_corto: true, pred_corto_horas: 36, pred_pagar_con: '', pred_giro: 'off', pred_giro_umbral: 40,
   pred_supervisor: true, pred_feedback: true, pred_monto_techo: 11, pred_max_total_techo: 30, pred_supervisor_log: [],
   // Varias IAs votan cada decisión del ciclo (un modelo de cada proveedor primero).
   ia_consenso: { enabled: true, size: 3 },
@@ -47,7 +47,7 @@ const RANGOS: Record<string, [number, number]> = {
   monto_min: [1, 1000], monto_max: [1, 5000], rsi_compra: [5, 60], rsi_venta: [40, 95], banda: [0, 20],
   ganancia_min: [0, 50], stop_perdida: [0, 50], ia_conf_min: [0, 100], max_ops_ciclo: [0, 10], saldo_simulado: [10, 1000000], orden_horas: [1, 168],
   pred_monto: [1, 500], pred_max_total: [1, 5000], pred_ventaja: [3, 40], pred_conf_min: [0, 100], pred_max_ciclo: [1, 5],
-  pred_prob_min: [1, 50], pred_prob_max: [50, 99], pred_horas_min: [0, 48], pred_tomar_ganancia: [0, 99], pred_corto_horas: [1, 168],
+  pred_prob_min: [1, 50], pred_prob_max: [50, 99], pred_horas_min: [0, 48], pred_tomar_ganancia: [0, 99], pred_corto_horas: [1, 168], pred_giro_umbral: [10, 49],
 };
 
 const CORS = {
@@ -129,6 +129,11 @@ function validarConfig(actual: Json, cambios: Json): { config?: Json; error?: st
   if (cambios.pred_ia !== undefined) {
     if (!['off', 'proponer', 'auto'].includes(cambios.pred_ia)) return { error: 'pred_ia inválido' };
     c.pred_ia = cambios.pred_ia;
+  }
+  // Protección por giro: la única venta con pérdida en predicciones, y solo si la activas.
+  if (cambios.pred_giro !== undefined) {
+    if (!['off', 'vender', 'girar'].includes(cambios.pred_giro)) return { error: 'pred_giro inválido' };
+    c.pred_giro = cambios.pred_giro;
   }
   if (c.pred_monto > c.pred_max_total) return { error: 'El monto por compra no puede pasar del tope total' };
   if (c.pred_tomar_ganancia > 0 && c.pred_tomar_ganancia < 50) return { error: 'Asegurar ganancia: 0 (apagado) o entre 50 y 99%' };
@@ -321,7 +326,7 @@ function limpiarPrediccion(base: Json, c: Json, config: Json): { orden?: Json; e
   return { orden: o };
 }
 
-const o_tipo = (n: Json) => (n.tipo === 'prediccion' ? 'Predicción · ' : '');
+const o_tipo = (n: Json) => (n.tipo === 'prediccion' ? (n.giro != null ? 'Predicción · 🔄 Giro (tu regla) · ' : 'Predicción · ') : '');
 async function mezclarOrdenes(env: Env, ahora: number, r: Json): Promise<void> {
   const upd: Json[] = Array.isArray(r.ordenes_upd) ? r.ordenes_upd : [];
   const nuevas: Json[] = Array.isArray(r.ordenes_nuevas) ? r.ordenes_nuevas : [];
@@ -344,7 +349,7 @@ async function mezclarOrdenes(env: Env, ahora: number, r: Json): Promise<void> {
     if (!v.orden) continue;
     const previa = lista.find((x) => PENDIENTE(x) && x.origen === 'ia' && x.simbolo === v.orden!.simbolo && x.accion === v.orden!.accion);
     if (previa) continue;
-    const o: Json = { ...v.orden, id: n.id || nuevoId('ia'), ts: ahora, origen: 'ia', confianza: n.confianza, ia: n.ia || null, categoria: n.categoria ? String(n.categoria).slice(0, 24) : undefined,
+    const o: Json = { ...v.orden, id: n.id || nuevoId('ia'), ts: ahora, origen: 'ia', confianza: n.confianza, ia: n.ia || null, categoria: n.categoria ? String(n.categoria).slice(0, 24) : undefined, giro: n.giro != null && Number.isFinite(Number(n.giro)) ? Number(n.giro) : undefined,
       estado: ['propuesta', 'aprobada', 'ejecutada', 'error'].includes(n.estado) ? n.estado : 'propuesta',
       nota: n.nota || null, error: n.error || null, resultado: n.resultado || null,
       vence: Math.min(ahora + (config.orden_horas || 24) * 3600_000, Number(n.caduca) > ahora ? Number(n.caduca) : Infinity),
@@ -511,14 +516,16 @@ async function runnerReporte(env: Env, r: Json): Promise<Response> {
   const serie = r.ok ? `${r.exchange}|${r.modo}` : estado.serie;
   if (r.ok && estado.serie !== serie) historial = [];
   if (r.ok && typeof r.total === 'number') historial.push([ahora, r.total]);
-  const { radar, cartera_sim, costos, graficas, feedback, feedback_resumen, ...ultimo } = r;
+  const { radar, cartera_sim, costos, graficas, feedback, feedback_resumen, giros, ...ultimo } = r;
   const nuevo: Json = {
     ciclo, actualizado: ahora, serie, ultimo: { ...ultimo, ts: ahora },
     historial: historial.slice(-500),
     runner: { costos: costos ?? estado.runner?.costos ?? {}, cartera_sim: cartera_sim ?? estado.runner?.cartera_sim ?? null,
       super_ts: r.supervisor?.ts ?? estado.runner?.super_ts ?? null,
       // Registro de decisiones y resultados: lo arma el runner y vuelve a él en el próximo ciclo.
-      feedback: feedback ?? estado.runner?.feedback ?? null, feedback_resumen: feedback_resumen ?? estado.runner?.feedback_resumen ?? null },
+      feedback: feedback ?? estado.runner?.feedback ?? null, feedback_resumen: feedback_resumen ?? estado.runner?.feedback_resumen ?? null,
+      // Mercados donde ya hubo un giro (no se repite): {id_mercado: ts}.
+      giros: giros && typeof giros === 'object' ? giros : estado.runner?.giros ?? {} },
     radar: Array.isArray(radar) && radar.length ? radar : estado.radar || [],
     radar_ts: Array.isArray(radar) && radar.length ? ahora : estado.radar_ts || null,
   };

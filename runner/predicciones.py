@@ -219,7 +219,7 @@ def categoria(m):
 EXTRA_TURBULENCIA = 4
 
 
-def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None, glob=None, fb=None):
+def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None, glob=None, fb=None, excluir=None):
     """La IA revisa los mejores candidatos y tus posiciones. Devuelve
     (órdenes_nuevas, notas, resumen). Con `libro(cod, comprar)` cada candidato se
     comprueba contra el mejor precio REAL antes de gastar una consulta de IA, y la
@@ -227,7 +227,8 @@ def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None, glob
     con turbulencia global (o del subyacente) se exige más ventaja.
     `opinar(candidatos, posiciones)` → ({coin: {accion, confianza, prob, razon}}, modelo, error).
     `fb` = resumen del feedback (feedback.resumir): si una categoría viene perdiendo o hay
-    racha de pérdidas, pide más confianza y menos compras. Nunca afloja lo que pusiste."""
+    racha de pérdidas, pide más confianza y menos compras. Nunca afloja lo que pusiste.
+    `excluir` = mercados donde hubo un giro: la IA no vuelve a entrar en ellos."""
     ventaja_min = float(cfg.get("pred_ventaja") or 8)
     monto, tope = float(cfg.get("pred_monto") or 11), float(cfg.get("pred_max_total") or 30)
     conf_min = float(cfg.get("pred_conf_min") if cfg.get("pred_conf_min") is not None else cfg.get("ia_conf_min") or 65)
@@ -242,6 +243,7 @@ def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None, glob
     abiertos = {int(str(p["coin"]).lstrip("+")) // 10 for p in posiciones}
     pend = {(str(o.get("coin")), o.get("accion")) for o in pendientes if o.get("tipo") == "prediccion"}
     abiertos |= {int(c.lstrip("#")) // 10 for c, _ in pend if c.lstrip("#").isdigit()}
+    abiertos |= set(excluir or ())
     por_mercado = {m["mercado"]: m for m in lista}
     notas, nuevas = [], []
 
@@ -403,3 +405,63 @@ def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None, glob
                            "ia": {"accion": "VENDER", "confianza": o["confianza"], "razon": o.get("razon", ""), "prob": o.get("prob")}})
             break
     return nuevas, notas, resumen
+
+
+# ---------------------------------------------------------------- Protección por giro
+# Excepción a «nunca vender con pérdida», solo en predicciones y solo si la activas
+# (pred_giro): cuando el mercado se da vuelta contra tu lado, vende para no perderlo
+# todo al vencer y, con «girar», usa lo cobrado para comprar el otro lado. Es una
+# regla fija con números (sin IA), y se confirma con el modelo estadístico para no
+# vender por un vaivén pasajero. Una sola vez por mercado: nunca va y vuelve.
+GIRO_CAIDA = 0.10        # tu lado tiene que haber caído al menos 10 puntos desde lo que pagaste
+GIRO_MODELO_MAX = 45     # y el modelo estadístico también tiene que darle menos de 45 %
+GIRO_VENTAJA_OTRO = 0.03  # el otro lado solo se compra si el modelo le ve al menos 3 puntos sobre su precio
+
+
+def giros(cfg, lista, posiciones, ya_girados, pendientes, ahora=None):
+    """Posiciones cuyo lado se dio vuelta. Devuelve ([plan], notas); cada plan =
+    {coin, unidades, etiqueta, mercado, precio, costo, prob_modelo, razon, otro?}.
+    `ya_girados` = ids de mercado donde ya hubo un giro (no se repite)."""
+    modo = cfg.get("pred_giro") or "off"
+    if modo not in ("vender", "girar"):
+        return [], []
+    umbral = float(cfg.get("pred_giro_umbral") or 40) / 100
+    ahora = ahora or time.time() * 1000
+    por_mercado = {m["mercado"]: m for m in lista or []}
+    vendiendo = {str(o.get("coin")) for o in pendientes or [] if o.get("tipo") == "prediccion" and o.get("accion") == "VENDER"}
+    planes, notas = [], []
+    for p in posiciones or []:
+        if p.get("precio") is None or int(p.get("cantidad") or 0) < 1 or (p.get("vence") and p["vence"] < ahora):
+            continue
+        cod = int(str(p["coin"]).lstrip("+"))
+        mid, lado = divmod(cod, 10)
+        etiqueta = f"{p['pregunta']} · {p['lado_nombre']}"
+        costo, precio = p.get("costo"), p["precio"]
+        if precio > umbral:
+            continue
+        if mid in ya_girados:
+            continue  # ya se giró una vez en este mercado: la posición nueva no se vuelve a girar
+        if not costo:
+            notas.append(f"Giro: «{etiqueta}» vale {precio:g}, pero no sé a cuánto la compraste: no la toco")
+            continue
+        if costo - precio < GIRO_CAIDA:
+            continue  # la compraste ya barata: no es un giro, es la apuesta que elegiste
+        if f"#{cod}" in vendiendo:
+            continue
+        m = por_mercado.get(mid)
+        lados = (m or {}).get("lados") or []
+        pm = (lados[lado] if lado < len(lados) else {}).get("prob_modelo")
+        if pm is None:
+            notas.append(f"Giro: «{etiqueta}» cayó a {precio:g} (pagaste {costo:g}), pero no hay modelo estadístico de ese mercado para confirmarlo: no vendo")
+            continue
+        if pm > GIRO_MODELO_MAX:
+            notas.append(f"Giro: «{etiqueta}» cayó a {precio:g} (pagaste {costo:g}), pero el modelo aún le da {pm:g}%: puede ser un vaivén, espero")
+            continue
+        plan = {"coin": f"#{cod}", "unidades": int(p["cantidad"]), "etiqueta": etiqueta, "mercado": mid, "precio": precio, "costo": costo, "prob_modelo": pm,
+                "horas": (m or {}).get("horas"),
+                "razon": f"Giro: tu lado cayó de {costo:g} a {precio:g} (tu límite: {umbral * 100:g}%) y el modelo le da {pm:g}%. Vendo para no perderlo todo al vencer."}
+        if modo == "girar" and len(lados) == 2:
+            o = lados[1 - lado]
+            plan["otro"] = {"coin": o.get("coin"), "etiqueta": f"{p['pregunta']} · {o.get('nombre')}", "prob_modelo": o.get("prob_modelo")}
+        planes.append(plan)
+    return planes, notas

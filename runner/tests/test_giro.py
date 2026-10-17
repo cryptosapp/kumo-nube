@@ -147,27 +147,56 @@ class HLGiro(HLFalso):
 
 
 class EnElCiclo(unittest.TestCase):
-    def correr(self, giro="girar", previos=None, pausado=False):
+    def correr(self, giro="girar", previos=None, pausado=False, pred_ia="auto", ordenes=None, hl=None):
         import os
         from unittest import mock
-        hl = HLGiro()
-        remoto = {"config": {"modo": "real", "quote": "USDC", "objetivo": {}, "ia": "off", "pred_ia": "off", "ordenes_ia": "off",
+        hl = hl or HLGiro()
+        remoto = {"config": {"modo": "real", "quote": "USDC", "objetivo": {}, "ia": "off", "pred_ia": pred_ia, "ordenes_ia": "off",
                              "pred_giro": giro, "pred_giro_umbral": 40, "pausado": pausado},
-                  "ordenes": [], "estado_runner": {"giros": previos or {}}}
+                  "ordenes": ordenes or [], "estado_runner": {"giros": previos or {}}}
         with mock.patch.dict(os.environ, {"EXCHANGE_ID": "hyperliquid", "EXCHANGE_API_KEY": "0xabc", "EXCHANGE_SECRET": "x", "KUMO_RUNNER_TOKEN": "t"}), \
                 mock.patch.object(K, "crear_exchange", lambda *a: hl), \
                 mock.patch.object(K, "http", lambda *a, **k: {"mercados": [mercado(si=0.70, prob=80)]}), \
+                mock.patch.object(K, "tomar_ordenes", lambda ids: set(ids)), \
                 mock.patch.object(K, "url_nube", lambda: "https://nube"), \
                 mock.patch.object(K.ia, "opinar", lambda *a: ({}, None, None)):
             return K.ciclo(remoto), hl
 
-    def test_funciona_aunque_la_ia_este_apagada(self):
+    def test_con_ejecuta_sola_vende_y_gira_aunque_la_ia_este_apagada(self):
         r, hl = self.correr()
         self.assertEqual(hl.ordenes, [(90171, False, 20, 0.28), (90170, True, 12, 0.44)])
         self.assertEqual([(o["accion"], o["estado"]) for o in r["ordenes_nuevas"]], [("VENDER", "ejecutada"), ("COMPRAR", "ejecutada")])
         self.assertEqual(len([e for e in r["ejecutadas"] if e.get("prediccion")]), 2)
         self.assertIn("9017", r["giros"])
         self.assertEqual([p["coin"] for p in r["predicciones"]], ["+90170"])
+
+    def test_si_la_ia_propone_solo_te_propone_la_venta(self):
+        """El caso real: IA en «propone · tú apruebas». No mueve nada sin ti."""
+        for modo in ("proponer", "off"):
+            r, hl = self.correr(pred_ia=modo)
+            self.assertEqual(hl.ordenes, [], modo)
+            self.assertEqual(r["ejecutadas"], [], modo)
+            (v,) = r["ordenes_nuevas"]
+            self.assertEqual((v["accion"], v["estado"], v["coin"], v["unidades"], v["limite"], v["giro"], v["permitir_perdida"]),
+                             ("VENDER", "propuesta", "#90171", 20, 0.28, 9017, True))
+            self.assertLessEqual(v["caduca"], time.time() * 1000 + 2 * H + 1000)
+            self.assertIn("aprobación", v["nota"])
+            self.assertIn("9017", r["giros"])  # una sola propuesta por mercado: no insiste cada ciclo
+            self.assertTrue(any("te propuse vender" in n for n in r["notas"]), r["notas"])
+
+    def test_la_venta_aprobada_se_ejecuta_y_propone_el_otro_lado(self):
+        venta = {"id": "giro1v", "tipo": "prediccion", "coin": "#90171", "simbolo": "#90171", "accion": "VENDER", "unidades": 20, "limite": 0.28,
+                 "etiqueta": "¿SOL ≥ 120 al vencer? · No", "permitir_perdida": True, "giro": 9017, "estado": "aprobada", "origen": "ia"}
+        r, hl = self.correr(pred_ia="proponer", ordenes=[venta], previos={"9017": int(time.time() * 1000) - H})
+        self.assertEqual(hl.ordenes, [(90171, False, 20, 0.28)])  # solo lo que aprobaste
+        (c,) = r["ordenes_nuevas"]
+        self.assertEqual((c["accion"], c["estado"], c["coin"], c["unidades"], c["giro"]), ("COMPRAR", "propuesta", "#90170", 12, 9017))
+
+    def test_el_modelo_tiene_que_estar_bajo_tu_limite(self):
+        """ETH: cayó a 0.35 pero el modelo le daba 44.9 %: con límite 40 % eso es un vaivén, no un giro."""
+        planes, notas = PR.giros(CFG, lista(si=0.65, prob=55.1), [pos(precio=0.35, costo=0.52)], set(), [])
+        self.assertEqual(planes, [])
+        self.assertTrue(any("44.9%" in n and "vaivén" in n for n in notas), notas)
 
     def test_no_se_repite_en_el_mismo_mercado(self):
         r, hl = self.correr(previos={"9017": int(time.time() * 1000) - H})

@@ -551,6 +551,10 @@ async function runnerReporte(env: Env, r: Json): Promise<Response> {
     titulo: `${o.simulada ? '🧪 ' : ''}${o.accion === 'COMPRAR' ? 'Compra' : 'Venta'} ${o.simbolo}`,
     texto: `${Number(o.total).toFixed(2)} ${r.quote} a ${o.precio} · ${o.motivo}`,
   }));
+  // Un giro propuesto vende con pérdida y caduca pronto: avisa para que lo apruebes o lo canceles a tiempo.
+  for (const n of Array.isArray(r.ordenes_nuevas) ? r.ordenes_nuevas : []) {
+    if (n && n.giro != null && n.estado === 'propuesta') avisos.push({ tipo: 'orden', titulo: '🔄 Giro: ¿lo apruebas?', texto: `${n.accion === 'VENDER' ? 'Vender' : 'Comprar'} ${n.unidades} de ${String(n.etiqueta || n.coin).slice(0, 80)} a ${n.limite}. Revísalo en Órdenes de predicción.` });
+  }
   const errores: string[] = r.errores || [];
   const previos: string[] = estado.ultimo?.errores || [];
   const nuevosErr = errores.filter((e) => !previos.includes(e));

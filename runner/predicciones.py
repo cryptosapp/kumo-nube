@@ -414,7 +414,7 @@ def proponer(cfg, lista, posiciones, pendientes, libre, opinar, libro=None, glob
 # regla fija con números (sin IA), y se confirma con el modelo estadístico para no
 # vender por un vaivén pasajero. Una sola vez por mercado: nunca va y vuelve.
 GIRO_CAIDA = 0.10        # tu lado tiene que haber caído al menos 10 puntos desde lo que pagaste
-GIRO_MODELO_MAX = 45     # y el modelo estadístico también tiene que darle menos de 45 %
+GIRO_MODELO_MAX = 45     # y el modelo estadístico también tiene que darle tu % o menos (nunca más de 45 %)
 GIRO_VENTAJA_OTRO = 0.03  # el otro lado solo se compra si el modelo le ve al menos 3 puntos sobre su precio
 
 
@@ -454,14 +454,26 @@ def giros(cfg, lista, posiciones, ya_girados, pendientes, ahora=None):
         if pm is None:
             notas.append(f"Giro: «{etiqueta}» cayó a {precio:g} (pagaste {costo:g}), pero no hay modelo estadístico de ese mercado para confirmarlo: no vendo")
             continue
-        if pm > GIRO_MODELO_MAX:
-            notas.append(f"Giro: «{etiqueta}» cayó a {precio:g} (pagaste {costo:g}), pero el modelo aún le da {pm:g}%: puede ser un vaivén, espero")
+        if pm > min(GIRO_MODELO_MAX, umbral * 100):
+            notas.append(f"Giro: «{etiqueta}» cayó a {precio:g} (pagaste {costo:g}), pero el modelo aún le da {pm:g}% (más que tu límite de {umbral * 100:g}%): puede ser un vaivén, espero")
             continue
         plan = {"coin": f"#{cod}", "unidades": int(p["cantidad"]), "etiqueta": etiqueta, "mercado": mid, "precio": precio, "costo": costo, "prob_modelo": pm,
                 "horas": (m or {}).get("horas"),
                 "razon": f"Giro: tu lado cayó de {costo:g} a {precio:g} (tu límite: {umbral * 100:g}%) y el modelo le da {pm:g}%. Vendo para no perderlo todo al vencer."}
-        if modo == "girar" and len(lados) == 2:
-            o = lados[1 - lado]
-            plan["otro"] = {"coin": o.get("coin"), "etiqueta": f"{p['pregunta']} · {o.get('nombre')}", "prob_modelo": o.get("prob_modelo")}
+        if modo == "girar":
+            o = otro_lado(lista, plan["coin"], p["pregunta"])
+            if o:
+                plan["otro"] = o
         planes.append(plan)
     return planes, notas
+
+
+def otro_lado(lista, coin, pregunta=None):
+    """El lado contrario de `coin` («#N») en su mercado: {coin, etiqueta, prob_modelo} o None."""
+    mid, lado = divmod(int(str(coin).lstrip("#+")), 10)
+    m = next((m for m in lista or [] if m.get("mercado") == mid), None)
+    lados = (m or {}).get("lados") or []
+    if len(lados) != 2 or lado > 1:
+        return None
+    o = lados[1 - lado]
+    return {"coin": o.get("coin"), "etiqueta": f"{pregunta or m.get('pregunta') or ''} · {o.get('nombre')}".strip(" ·"), "prob_modelo": o.get("prob_modelo")}

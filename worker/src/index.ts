@@ -405,7 +405,7 @@ async function ordenesApi(env: Env, c: Json): Promise<Response> {
   }
   if ((accion === 'aprobar' || accion === 'cancelar') && o) {
     o.estado = accion === 'aprobar' ? 'aprobada' : 'cancelada';
-    // Predicciones: el precio cambia rápido; aprobada vale 2 h (el ciclo corre cada 30 min).
+    // Predicciones: el precio cambia rápido; aprobada vale 2 h (el ciclo corre cada hora).
     if (accion === 'aprobar') o.vence = o.tipo === 'prediccion' ? ahora + 2 * 3600_000 : Math.max(o.vence || 0, ahora + (config.orden_horas || 24) * 3600_000);
     hist(o, 'usuario', accion === 'aprobar' ? 'Aprobada: se ejecuta en el próximo ciclo' : 'Cancelada');
     await guardarOrdenes(env, lista);

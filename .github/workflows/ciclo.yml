@@ -1,9 +1,12 @@
 name: Ciclo Kumo
 
-# Un ciclo del bot cada 30 min (≈1.440 min/mes: cabe en los 2.000 gratis de un repo privado).
+# Un ciclo del bot cada hora. GitHub cobra cada ciclo por minuto entero (92 s = 2 min):
+# con uno cada 30 min se pasaban los 2.000 minutos gratis del mes de un repo privado y
+# GitHub dejaba de correrlos. Cada hora y en menos de 1 min ≈ 744 min/mes, con margen
+# para los que lances desde la app.
 on:
   schedule:
-    - cron: "7,37 * * * *"
+    - cron: "7 * * * *"
   workflow_dispatch:
   repository_dispatch:
     types: [kumo-ciclo]
@@ -25,15 +28,24 @@ jobs:
           if [ -f kumo.json ]; then echo "ok=1" >> "$GITHUB_OUTPUT"; else echo "Kumo aún no está instalado: ejecuta «Instalar Kumo»."; fi
 
       - uses: actions/setup-python@v5
+        id: py
         if: steps.inst.outputs.ok
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: runner/requirements.txt
+
+      # Entorno con ccxt ya instalado, guardado entre ciclos: ahorra ~10 s por ciclo.
+      - uses: actions/cache@v4
+        id: venv
+        if: steps.inst.outputs.ok
+        with:
+          path: ~/.venv-kumo
+          key: venv-${{ runner.os }}-${{ steps.py.outputs.python-version }}-${{ hashFiles('runner/requirements.txt') }}
 
       - name: Dependencias
-        if: steps.inst.outputs.ok
-        run: pip install -q -r runner/requirements.txt
+        if: steps.inst.outputs.ok && steps.venv.outputs.cache-hit != 'true'
+        run: |
+          python -m venv ~/.venv-kumo
+          ~/.venv-kumo/bin/pip install -q -r runner/requirements.txt
 
       - name: Ejecutar ciclo
         if: steps.inst.outputs.ok
@@ -47,4 +59,4 @@ jobs:
           EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
           EXCHANGE_SECRET: ${{ secrets.EXCHANGE_SECRET }}
           EXCHANGE_PASSWORD: ${{ secrets.EXCHANGE_PASSWORD }}
-        run: python runner/kumo_runner.py
+        run: ~/.venv-kumo/bin/python runner/kumo_runner.py

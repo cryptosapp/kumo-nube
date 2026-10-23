@@ -628,6 +628,11 @@ def enviar_reporte(url, token, reporte, intentos=4, espera=5):
             time.sleep(espera * (i + 1))
 
 
+# La IA tiene hasta 30 s por ciclo (contando desde que empieza): así el trabajo entero
+# de GitHub dura menos de 1 minuto, que es lo que cobra como mínimo por cada ciclo.
+IA_SEGUNDOS = 30
+
+
 def main():
     url, token = url_nube(), os.getenv("KUMO_RUNNER_TOKEN", "")
     if not url or not token:
@@ -636,6 +641,7 @@ def main():
     remoto = http("GET", url + "/runner/config", token)
     inicio = time.time()
     parcial = {}
+    ia.LIMITE_TS = inicio + IA_SEGUNDOS
     try:
         reporte = ciclo(remoto, parcial)
         reporte["ok"] = True
@@ -652,6 +658,7 @@ def main():
         for k in ("ordenes_upd", "ejecutadas", "ordenes_nuevas"):
             if parcial.get(k):
                 reporte[k] = parcial[k]
+    ia.LIMITE_TS = None
     reporte["duracion"] = round(time.time() - inicio, 1)
     resp = enviar_reporte(url, token, reporte)
     # Sin saldos ni claves en el log: solo un resumen.

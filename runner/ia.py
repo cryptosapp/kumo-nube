@@ -37,6 +37,24 @@ CATALOGO = {
 }
 MAX_TOKENS = 2048
 TIMEOUT = 45
+# Tope de tiempo para la IA en todo el ciclo (epoch s; None = sin tope). GitHub cobra
+# cada ciclo por minuto entero: si el ciclo pasa de 60 s cuesta el doble y los 2.000
+# minutos gratis del mes no alcanzan. Lo fija el runner al empezar el ciclo.
+LIMITE_TS = None
+
+
+class SinTiempo(ValueError):
+    pass
+
+
+def _timeout():
+    """Segundos que le quedan a esta llamada: lo que falte para el tope, nunca más de TIMEOUT."""
+    if LIMITE_TS is None:
+        return TIMEOUT
+    quedan = LIMITE_TS - time.time()
+    if quedan < 4:
+        raise SinTiempo("sin tiempo en este ciclo (para no gastar minutos de GitHub)")
+    return min(TIMEOUT, quedan)
 
 # Modelo que respondió en la última prueba de la app (Config → semáforo): se prueba
 # primero dentro de su proveedor.
@@ -147,7 +165,7 @@ def _llamar(url, clave, modelo, mensajes, formato_json=True):
     if clave:  # los gratuitos sin clave no llevan Authorization
         cab["Authorization"] = f"Bearer {clave}"
     req = urllib.request.Request(url + "/chat/completions", data=json.dumps(datos).encode(), method="POST", headers=cab)
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+    with urllib.request.urlopen(req, timeout=_timeout()) as r:
         resp = json.loads(r.read().decode())
     eleccion = (resp.get("choices") or [{}])[0]
     contenido = (eleccion.get("message") or {}).get("content")
@@ -267,6 +285,9 @@ def consultar_varias(mensajes, n, valido=lambda d: True):
         return pm, preguntar(prov, modelo, mensajes)
 
     while cola and len(ok) < n:
+        if LIMITE_TS is not None and LIMITE_TS - time.time() < 4:
+            errores.append({"proveedor": "-", "modelo": "-", "error": "sin tiempo en este ciclo (para no gastar minutos de GitHub)"})
+            break
         ronda, cola = cola[:n - len(ok)], cola[n - len(ok):]
         ronda = [pm for pm in ronda if pm[0]["nombre"] not in caidos]
         if not ronda:
